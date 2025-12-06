@@ -28,7 +28,7 @@ export interface EmailParams {
 export async function sendReportEmail(params: EmailParams): Promise<void> {
   const { to, personA, personB, pdfBytes } = params;
 
-  const emailFrom = process.env.EMAIL_FROM || "AstroMatch <no-reply@astromatch.app>";
+  const emailFrom = process.env.EMAIL_FROM || "AstroMatch <onboarding@resend.dev>";
 
   const htmlContent = `
 <!DOCTYPE html>
