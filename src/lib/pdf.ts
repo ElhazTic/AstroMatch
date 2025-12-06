@@ -1,4 +1,7 @@
-import { PDFDocument, rgb, StandardFonts, PDFPage, PDFFont } from "pdf-lib";
+import { PDFDocument, rgb, PDFPage, PDFFont } from "pdf-lib";
+import fontkit from "@pdf-lib/fontkit";
+import * as fs from "fs";
+import * as path from "path";
 
 // Couleurs du thème Premium
 const BACKGROUND = rgb(0.047, 0.059, 0.106); // #0C0F1B
@@ -17,10 +20,8 @@ const FOOTER_HEIGHT = 30;
 
 interface PdfContext {
   pdfDoc: PDFDocument;
-  helvetica: PDFFont;
-  helveticaBold: PDFFont;
-  timesRoman: PDFFont;
-  timesRomanBold: PDFFont;
+  regularFont: PDFFont;
+  boldFont: PDFFont;
   currentPage: PDFPage;
   yPosition: number;
   pageNumber: number;
@@ -28,34 +29,108 @@ interface PdfContext {
   personB: string;
 }
 
-// Fonction pour wrapper le texte intelligemment
+/**
+ * Charge les polices personnalisées UTF-8 (Inter) depuis le système de fichiers ou via fetch
+ */
+async function loadCustomFonts(pdfDoc: PDFDocument): Promise<{ regularFont: PDFFont; boldFont: PDFFont }> {
+  let regularFontBytes: Uint8Array;
+  let boldFontBytes: Uint8Array;
+
+  // Essayer de charger depuis le système de fichiers (en production Vercel ou local)
+  try {
+    const fontsDir = path.join(process.cwd(), "public", "fonts");
+    const regularPath = path.join(fontsDir, "Inter-Regular.ttf");
+    const boldPath = path.join(fontsDir, "Inter-Bold.ttf");
+
+    if (fs.existsSync(regularPath) && fs.existsSync(boldPath)) {
+      const regularBuffer = fs.readFileSync(regularPath);
+      const boldBuffer = fs.readFileSync(boldPath);
+      regularFontBytes = new Uint8Array(regularBuffer);
+      boldFontBytes = new Uint8Array(boldBuffer);
+    } else {
+      throw new Error("Font files not found on filesystem");
+    }
+  } catch {
+    // Fallback: charger via HTTP (utile si exécuté dans un contexte différent)
+    const baseUrl = process.env.NEXT_PUBLIC_SITE_URL || "http://localhost:3000";
+    
+    const [regularRes, boldRes] = await Promise.all([
+      fetch(`${baseUrl}/fonts/Inter-Regular.ttf`),
+      fetch(`${baseUrl}/fonts/Inter-Bold.ttf`),
+    ]);
+
+    if (!regularRes.ok || !boldRes.ok) {
+      throw new Error("Failed to load custom fonts via HTTP");
+    }
+
+    regularFontBytes = new Uint8Array(await regularRes.arrayBuffer());
+    boldFontBytes = new Uint8Array(await boldRes.arrayBuffer());
+  }
+
+  // Embed les polices dans le document PDF
+  const regularFont = await pdfDoc.embedFont(regularFontBytes);
+  const boldFont = await pdfDoc.embedFont(boldFontBytes);
+
+  return { regularFont, boldFont };
+}
+
+/**
+ * Nettoie le texte pour enlever les caractères problématiques
+ * tout en conservant les caractères UTF-8 valides
+ */
+function sanitizeText(text: string): string {
+  if (!text) return "";
+  
+  // Remplacer les caractères spéciaux problématiques
+  return text
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, "") // Caractères de contrôle
+    .replace(/\u200B/g, "") // Zero-width space
+    .replace(/\uFEFF/g, "") // BOM
+    .trim();
+}
+
+/**
+ * Fonction pour wrapper le texte intelligemment avec gestion UTF-8
+ */
 function wrapText(
   text: string,
   font: PDFFont,
   fontSize: number,
   maxWidth: number
 ): string[] {
-  const words = text.split(" ");
+  const sanitized = sanitizeText(text);
+  const words = sanitized.split(/\s+/);
   const lines: string[] = [];
   let currentLine = "";
 
   for (const word of words) {
+    if (!word) continue;
+    
     const testLine = currentLine ? `${currentLine} ${word}` : word;
-    const testWidth = font.widthOfTextAtSize(testLine, fontSize);
+    
+    try {
+      const testWidth = font.widthOfTextAtSize(testLine, fontSize);
 
-    if (testWidth <= maxWidth) {
-      currentLine = testLine;
-    } else {
+      if (testWidth <= maxWidth) {
+        currentLine = testLine;
+      } else {
+        if (currentLine) lines.push(currentLine);
+        currentLine = word;
+      }
+    } catch {
+      // Si un caractère ne peut pas être encodé, on l'ignore
       if (currentLine) lines.push(currentLine);
-      currentLine = word;
+      currentLine = "";
     }
   }
 
   if (currentLine) lines.push(currentLine);
-  return lines;
+  return lines.length > 0 ? lines : [""];
 }
 
-// Fonction pour dessiner le fond de page
+/**
+ * Fonction pour dessiner le fond de page
+ */
 function drawBackground(page: PDFPage): void {
   page.drawRectangle({
     x: 0,
@@ -66,9 +141,11 @@ function drawBackground(page: PDFPage): void {
   });
 }
 
-// Fonction pour dessiner le header
+/**
+ * Fonction pour dessiner le header
+ */
 function drawHeader(ctx: PdfContext): void {
-  const { currentPage, helvetica } = ctx;
+  const { currentPage, regularFont } = ctx;
 
   // Ligne dorée en haut
   currentPage.drawRectangle({
@@ -80,18 +157,21 @@ function drawHeader(ctx: PdfContext): void {
   });
 
   // Texte header
-  currentPage.drawText("AstroMatch — Rapport de Compatibilité", {
+  const headerText = "AstroMatch - Rapport de Compatibilite";
+  currentPage.drawText(headerText, {
     x: MARGIN,
     y: PAGE_HEIGHT - 28,
     size: 9,
-    font: helvetica,
+    font: regularFont,
     color: LIGHT_GOLD,
   });
 }
 
-// Fonction pour dessiner le footer avec numéro de page
+/**
+ * Fonction pour dessiner le footer avec numéro de page
+ */
 function drawFooter(ctx: PdfContext): void {
-  const { currentPage, helvetica, pageNumber } = ctx;
+  const { currentPage, regularFont, pageNumber } = ctx;
 
   // Ligne dorée en bas
   currentPage.drawRectangle({
@@ -103,18 +183,20 @@ function drawFooter(ctx: PdfContext): void {
   });
 
   // Numéro de page centré
-  const pageText = `— ${pageNumber} —`;
-  const textWidth = helvetica.widthOfTextAtSize(pageText, 10);
+  const pageText = `- ${pageNumber} -`;
+  const textWidth = regularFont.widthOfTextAtSize(pageText, 10);
   currentPage.drawText(pageText, {
     x: (PAGE_WIDTH - textWidth) / 2,
     y: FOOTER_HEIGHT - 5,
     size: 10,
-    font: helvetica,
+    font: regularFont,
     color: LIGHT_GOLD,
   });
 }
 
-// Fonction pour créer une nouvelle page
+/**
+ * Fonction pour créer une nouvelle page
+ */
 function createNewPage(ctx: PdfContext, withHeaderFooter = true): void {
   ctx.currentPage = ctx.pdfDoc.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
   ctx.pageNumber++;
@@ -129,18 +211,23 @@ function createNewPage(ctx: PdfContext, withHeaderFooter = true): void {
   }
 }
 
-// Fonction pour vérifier si on doit créer une nouvelle page
+/**
+ * Fonction pour vérifier si on doit créer une nouvelle page
+ */
 function checkNewPage(ctx: PdfContext, requiredSpace: number): void {
   if (ctx.yPosition - requiredSpace < MARGIN + FOOTER_HEIGHT + 20) {
     createNewPage(ctx);
   }
 }
 
-// Fonction pour dessiner un titre de section
+/**
+ * Fonction pour dessiner un titre de section
+ */
 function drawSectionTitle(ctx: PdfContext, title: string): void {
   checkNewPage(ctx, 60);
 
-  const { currentPage, helveticaBold } = ctx;
+  const { currentPage, boldFont } = ctx;
+  const sanitizedTitle = sanitizeText(title);
 
   // Ligne décorative au-dessus
   currentPage.drawRectangle({
@@ -153,40 +240,62 @@ function drawSectionTitle(ctx: PdfContext, title: string): void {
 
   ctx.yPosition -= 20;
 
-  currentPage.drawText(title.toUpperCase(), {
+  currentPage.drawText(sanitizedTitle.toUpperCase(), {
     x: MARGIN,
     y: ctx.yPosition,
     size: 14,
-    font: helveticaBold,
+    font: boldFont,
     color: GOLD,
   });
 
   ctx.yPosition -= 25;
 }
 
-// Fonction pour dessiner un paragraphe
+/**
+ * Fonction pour dessiner un paragraphe avec gestion automatique du retour à la ligne
+ */
 function drawParagraph(
   ctx: PdfContext,
   text: string,
   fontSize = 11,
   lineHeight = 18
 ): void {
-  const { currentPage, timesRoman } = ctx;
-  const lines = wrapText(text, timesRoman, fontSize, CONTENT_WIDTH);
+  const { regularFont } = ctx;
+  const sanitizedText = sanitizeText(text);
+  
+  // Séparer par paragraphes (double saut de ligne)
+  const paragraphs = sanitizedText.split(/\n\n+/);
+  
+  for (const paragraph of paragraphs) {
+    const singleLines = paragraph.split(/\n/);
+    
+    for (const singleLine of singleLines) {
+      const lines = wrapText(singleLine, regularFont, fontSize, CONTENT_WIDTH);
 
-  for (const line of lines) {
-    checkNewPage(ctx, lineHeight + 5);
-    currentPage.drawText(line, {
-      x: MARGIN,
-      y: ctx.yPosition,
-      size: fontSize,
-      font: timesRoman,
-      color: TEXT_COLOR,
-    });
-    ctx.yPosition -= lineHeight;
+      for (const line of lines) {
+        checkNewPage(ctx, lineHeight + 5);
+        
+        try {
+          ctx.currentPage.drawText(line, {
+            x: MARGIN,
+            y: ctx.yPosition,
+            size: fontSize,
+            font: regularFont,
+            color: TEXT_COLOR,
+          });
+        } catch {
+          // Si le texte ne peut pas être rendu, on continue
+          console.warn("Could not render line:", line);
+        }
+        ctx.yPosition -= lineHeight;
+      }
+    }
+    
+    // Espace entre paragraphes
+    ctx.yPosition -= 8;
   }
 
-  ctx.yPosition -= 10;
+  ctx.yPosition -= 5;
 }
 
 // ============================================
@@ -224,23 +333,23 @@ function createCoverPage(
 
   // Titre ASTROMATCH
   const titleText = "ASTROMATCH";
-  const titleWidth = ctx.helveticaBold.widthOfTextAtSize(titleText, 42);
+  const titleWidth = ctx.boldFont.widthOfTextAtSize(titleText, 42);
   page.drawText(titleText, {
     x: (PAGE_WIDTH - titleWidth) / 2,
     y: PAGE_HEIGHT - 180,
     size: 42,
-    font: ctx.helveticaBold,
+    font: ctx.boldFont,
     color: GOLD,
   });
 
   // Sous-titre
-  const subtitleText = "Analyse Premium de Compatibilité";
-  const subtitleWidth = ctx.helvetica.widthOfTextAtSize(subtitleText, 16);
+  const subtitleText = "Analyse Premium de Compatibilite";
+  const subtitleWidth = ctx.regularFont.widthOfTextAtSize(subtitleText, 16);
   page.drawText(subtitleText, {
     x: (PAGE_WIDTH - subtitleWidth) / 2,
     y: PAGE_HEIGHT - 210,
     size: 16,
-    font: ctx.helvetica,
+    font: ctx.regularFont,
     color: LIGHT_GOLD,
   });
 
@@ -254,13 +363,15 @@ function createCoverPage(
   });
 
   // Noms des personnes
-  const namesText = `${personA} & ${personB}`;
-  const namesWidth = ctx.helveticaBold.widthOfTextAtSize(namesText, 28);
+  const sanitizedA = sanitizeText(personA);
+  const sanitizedB = sanitizeText(personB);
+  const namesText = `${sanitizedA} & ${sanitizedB}`;
+  const namesWidth = ctx.boldFont.widthOfTextAtSize(namesText, 28);
   page.drawText(namesText, {
     x: (PAGE_WIDTH - namesWidth) / 2,
     y: PAGE_HEIGHT - 350,
     size: 28,
-    font: ctx.helveticaBold,
+    font: ctx.boldFont,
     color: TEXT_COLOR,
   });
 
@@ -279,24 +390,24 @@ function createCoverPage(
   });
 
   // Label score
-  const scoreLabelText = "SCORE DE COMPATIBILITÉ";
-  const scoreLabelWidth = ctx.helvetica.widthOfTextAtSize(scoreLabelText, 10);
+  const scoreLabelText = "SCORE DE COMPATIBILITE";
+  const scoreLabelWidth = ctx.regularFont.widthOfTextAtSize(scoreLabelText, 10);
   page.drawText(scoreLabelText, {
     x: (PAGE_WIDTH - scoreLabelWidth) / 2,
     y: scoreY + 50,
     size: 10,
-    font: ctx.helvetica,
+    font: ctx.regularFont,
     color: LIGHT_GOLD,
   });
 
   // Score
   const scoreText = `${score}/100`;
-  const scoreWidth = ctx.helveticaBold.widthOfTextAtSize(scoreText, 36);
+  const scoreWidth = ctx.boldFont.widthOfTextAtSize(scoreText, 36);
   page.drawText(scoreText, {
     x: (PAGE_WIDTH - scoreWidth) / 2,
     y: scoreY,
     size: 36,
-    font: ctx.helveticaBold,
+    font: ctx.boldFont,
     color: GOLD,
   });
 
@@ -318,13 +429,14 @@ function createCoverPage(
   });
 
   // Copyright
-  const copyrightText = `© ${new Date().getFullYear()} AstroMatch — Tous droits réservés`;
-  const copyrightWidth = ctx.helvetica.widthOfTextAtSize(copyrightText, 9);
+  const year = new Date().getFullYear();
+  const copyrightText = `(c) ${year} AstroMatch - Tous droits reserves`;
+  const copyrightWidth = ctx.regularFont.widthOfTextAtSize(copyrightText, 9);
   page.drawText(copyrightText, {
     x: (PAGE_WIDTH - copyrightWidth) / 2,
     y: 40,
     size: 9,
-    font: ctx.helvetica,
+    font: ctx.regularFont,
     color: LIGHT_GOLD,
   });
 }
@@ -341,13 +453,13 @@ function createTableOfContents(ctx: PdfContext): void {
   let y = PAGE_HEIGHT - 80;
 
   // Titre
-  const tocTitle = "TABLE DES MATIÈRES";
-  const tocTitleWidth = ctx.helveticaBold.widthOfTextAtSize(tocTitle, 24);
+  const tocTitle = "TABLE DES MATIERES";
+  const tocTitleWidth = ctx.boldFont.widthOfTextAtSize(tocTitle, 24);
   page.drawText(tocTitle, {
     x: (PAGE_WIDTH - tocTitleWidth) / 2,
     y,
     size: 24,
-    font: ctx.helveticaBold,
+    font: ctx.boldFont,
     color: GOLD,
   });
 
@@ -366,12 +478,12 @@ function createTableOfContents(ctx: PdfContext): void {
 
   const sections = [
     { num: "1", title: "Introduction", page: "3" },
-    { num: "2", title: `Portrait Individuel — ${ctx.personA}`, page: "3" },
-    { num: "3", title: `Portrait Individuel — ${ctx.personB}`, page: "4" },
-    { num: "4", title: "Analyse Croisée — La dynamique du couple", page: "4" },
+    { num: "2", title: `Portrait Individuel - ${sanitizeText(ctx.personA)}`, page: "3" },
+    { num: "3", title: `Portrait Individuel - ${sanitizeText(ctx.personB)}`, page: "4" },
+    { num: "4", title: "Analyse Croisee - La dynamique du couple", page: "4" },
     { num: "5", title: "Forces Majeures", page: "5" },
     { num: "6", title: "Points de Vigilance", page: "5" },
-    { num: "7", title: "Conseils Personnalisés", page: "6" },
+    { num: "7", title: "Conseils Personnalises", page: "6" },
     { num: "8", title: "Conclusion", page: "6" },
   ];
 
@@ -381,7 +493,7 @@ function createTableOfContents(ctx: PdfContext): void {
       x: MARGIN,
       y,
       size: 12,
-      font: ctx.helveticaBold,
+      font: ctx.boldFont,
       color: GOLD,
     });
 
@@ -390,12 +502,12 @@ function createTableOfContents(ctx: PdfContext): void {
       x: MARGIN + 25,
       y,
       size: 12,
-      font: ctx.helvetica,
+      font: ctx.regularFont,
       color: TEXT_COLOR,
     });
 
     // Pointillés
-    const dotStart = MARGIN + 30 + ctx.helvetica.widthOfTextAtSize(section.title, 12);
+    const dotStart = MARGIN + 30 + ctx.regularFont.widthOfTextAtSize(section.title, 12);
     const dotEnd = PAGE_WIDTH - MARGIN - 30;
     let dotX = dotStart + 10;
     while (dotX < dotEnd) {
@@ -403,7 +515,7 @@ function createTableOfContents(ctx: PdfContext): void {
         x: dotX,
         y,
         size: 12,
-        font: ctx.helvetica,
+        font: ctx.regularFont,
         color: LIGHT_GOLD,
       });
       dotX += 8;
@@ -414,7 +526,7 @@ function createTableOfContents(ctx: PdfContext): void {
       x: PAGE_WIDTH - MARGIN - 10,
       y,
       size: 12,
-      font: ctx.helvetica,
+      font: ctx.regularFont,
       color: GOLD,
     });
 
@@ -514,17 +626,17 @@ export async function generatePremiumPdf(
   const { personA, personB, score, longReport } = params;
 
   const pdfDoc = await PDFDocument.create();
-  const helvetica = await pdfDoc.embedFont(StandardFonts.Helvetica);
-  const helveticaBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
-  const timesRoman = await pdfDoc.embedFont(StandardFonts.TimesRoman);
-  const timesRomanBold = await pdfDoc.embedFont(StandardFonts.TimesRomanBold);
+  
+  // Enregistrer fontkit pour pouvoir utiliser des polices personnalisées
+  pdfDoc.registerFontkit(fontkit);
+  
+  // Charger les polices UTF-8 personnalisées (Inter)
+  const { regularFont, boldFont } = await loadCustomFonts(pdfDoc);
 
   const ctx: PdfContext = {
     pdfDoc,
-    helvetica,
-    helveticaBold,
-    timesRoman,
-    timesRomanBold,
+    regularFont,
+    boldFont,
     currentPage: null as unknown as PDFPage,
     yPosition: PAGE_HEIGHT - MARGIN,
     pageNumber: 0,
@@ -546,35 +658,35 @@ export async function generatePremiumPdf(
 
   // 5. Section 1 - Introduction
   drawSectionTitle(ctx, "1. Introduction");
-  drawParagraph(ctx, parsed.introduction || "L'union entre ces deux êtres révèle une alchimie unique et fascinante...");
+  drawParagraph(ctx, parsed.introduction || "L'union entre ces deux etres revele une alchimie unique et fascinante...");
 
   // 6. Section 2 - Portrait A
-  drawSectionTitle(ctx, `2. Portrait — ${personA}`);
-  drawParagraph(ctx, parsed.portraitA || "Cette personne possède une énergie remarquable...");
+  drawSectionTitle(ctx, `2. Portrait - ${sanitizeText(personA)}`);
+  drawParagraph(ctx, parsed.portraitA || "Cette personne possede une energie remarquable...");
 
   // 7. Section 3 - Portrait B
-  drawSectionTitle(ctx, `3. Portrait — ${personB}`);
-  drawParagraph(ctx, parsed.portraitB || "L'essence de cette personne se caractérise par...");
+  drawSectionTitle(ctx, `3. Portrait - ${sanitizeText(personB)}`);
+  drawParagraph(ctx, parsed.portraitB || "L'essence de cette personne se caracterise par...");
 
   // 8. Section 4 - Dynamique du couple
-  drawSectionTitle(ctx, "4. Analyse Croisée — La Dynamique du Couple");
-  drawParagraph(ctx, parsed.dynamique || "La rencontre de ces deux énergies crée une dynamique singulière...");
+  drawSectionTitle(ctx, "4. Analyse Croisee - La Dynamique du Couple");
+  drawParagraph(ctx, parsed.dynamique || "La rencontre de ces deux energies cree une dynamique singuliere...");
 
   // 9. Section 5 - Forces Majeures
   drawSectionTitle(ctx, "5. Forces Majeures");
-  drawParagraph(ctx, parsed.forces || "Cette union est bénie par plusieurs atouts majeurs...");
+  drawParagraph(ctx, parsed.forces || "Cette union est benie par plusieurs atouts majeurs...");
 
   // 10. Section 6 - Points de Vigilance
   drawSectionTitle(ctx, "6. Points de Vigilance");
-  drawParagraph(ctx, parsed.vigilance || "Comme toute relation, certains aspects méritent une attention particulière...");
+  drawParagraph(ctx, parsed.vigilance || "Comme toute relation, certains aspects meritent une attention particuliere...");
 
   // 11. Section 7 - Conseils Personnalisés
-  drawSectionTitle(ctx, "7. Conseils Personnalisés");
-  drawParagraph(ctx, parsed.conseils || "Pour faire prospérer cette relation, voici quelques recommandations...");
+  drawSectionTitle(ctx, "7. Conseils Personnalises");
+  drawParagraph(ctx, parsed.conseils || "Pour faire prosperer cette relation, voici quelques recommandations...");
 
   // 12. Section 8 - Conclusion
   drawSectionTitle(ctx, "8. Conclusion");
-  drawParagraph(ctx, parsed.conclusion || "Cette analyse révèle un potentiel relationnel riche et prometteur...");
+  drawParagraph(ctx, parsed.conclusion || "Cette analyse revele un potentiel relationnel riche et prometteur...");
 
   // Page finale avec disclaimer
   checkNewPage(ctx, 100);
@@ -590,8 +702,8 @@ export async function generatePremiumPdf(
     borderWidth: 1,
   });
 
-  const disclaimerText = "Ce rapport est un outil de réflexion et d'exploration personnelle. Il ne remplace pas un avis professionnel en psychologie ou en conseil conjugal.";
-  const disclaimerLines = wrapText(disclaimerText, ctx.helvetica, 10, CONTENT_WIDTH - 30);
+  const disclaimerText = "Ce rapport est un outil de reflexion et d'exploration personnelle. Il ne remplace pas un avis professionnel en psychologie ou en conseil conjugal.";
+  const disclaimerLines = wrapText(disclaimerText, ctx.regularFont, 10, CONTENT_WIDTH - 30);
   
   let disclaimerY = ctx.yPosition - 20;
   for (const line of disclaimerLines) {
@@ -599,7 +711,7 @@ export async function generatePremiumPdf(
       x: MARGIN + 15,
       y: disclaimerY,
       size: 10,
-      font: ctx.helvetica,
+      font: ctx.regularFont,
       color: LIGHT_GOLD,
     });
     disclaimerY -= 15;
@@ -640,14 +752,14 @@ export async function generateCompatibilityPdf(
 INTRODUCTION:
 ${summary}
 
-PORTRAIT INDIVIDUEL — ${personA}:
-${personA} apporte à cette union son énergie unique et ses qualités propres.
+PORTRAIT INDIVIDUEL - ${personA}:
+${personA} apporte a cette union son energie unique et ses qualites propres.
 
-PORTRAIT INDIVIDUEL — ${personB}:
-${personB} complète cette relation avec sa personnalité distinctive.
+PORTRAIT INDIVIDUEL - ${personB}:
+${personB} complete cette relation avec sa personnalite distinctive.
 
-ANALYSE CROISÉE — LA DYNAMIQUE DU COUPLE:
-La rencontre de ces deux êtres crée une alchimie particulière.
+ANALYSE CROISEE - LA DYNAMIQUE DU COUPLE:
+La rencontre de ces deux etres cree une alchimie particuliere.
 
 FORCES MAJEURES:
 ${strengths}
@@ -655,11 +767,11 @@ ${strengths}
 POINTS DE VIGILANCE:
 ${weaknesses}
 
-CONSEILS PERSONNALISÉS:
+CONSEILS PERSONNALISES:
 ${advice}
 
 CONCLUSION:
-Cette analyse révèle un potentiel relationnel à cultiver avec attention et bienveillance.
+Cette analyse revele un potentiel relationnel a cultiver avec attention et bienveillance.
 `;
 
   return generatePremiumPdf({
