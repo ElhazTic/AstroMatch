@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { constructWebhookEvent } from "@/lib/stripe";
-import { generateCompatibilityPdf } from "@/lib/pdf";
+import { generatePremiumPdf } from "@/lib/pdf";
 import { sendReportEmail } from "@/lib/email";
 import { generateLongReport } from "@/lib/generateLongReport";
 import Stripe from "stripe";
@@ -46,11 +46,11 @@ export async function POST(request: NextRequest) {
         );
       }
 
-      const { email, personA, dateA, personB, dateB, score } = metadata;
+      const { email, personA, dateA, personB, dateB } = metadata;
 
       // Validation des metadata
       if (!email || !personA || !personB || !dateA || !dateB) {
-        console.error("Missing required metadata");
+        console.error("Missing required metadata:", { email, personA, personB, dateA, dateB });
         return NextResponse.json(
           { error: "Missing required metadata" },
           { status: 400 }
@@ -60,30 +60,33 @@ export async function POST(request: NextRequest) {
       console.log(`Processing premium payment for ${email} - ${personA} & ${personB}`);
 
       try {
-        // 1. Générer le rapport long premium via OpenAI
-        console.log("Generating long premium report...");
-        const longReport = await generateLongReport({
+        // 1. Générer le rapport premium structuré via OpenAI
+        console.log("Generating long premium report via OpenAI...");
+        const reportData = await generateLongReport({
           personA,
           dateA,
           personB,
           dateB,
         });
-        console.log(`Long report generated (${longReport.length} characters)`);
+        console.log(`Premium report generated - Score: ${reportData.score}`);
+        console.log(`Summary length: ${reportData.summary.length} chars`);
+        console.log(`PortraitA length: ${reportData.portraitA.length} chars`);
+        console.log(`PortraitB length: ${reportData.portraitB.length} chars`);
 
-        // 2. Générer le PDF premium avec le rapport long
+        // 2. Générer le PDF premium avec les données structurées
         console.log("Generating premium PDF...");
-        const pdfBytes = await generateCompatibilityPdf({
+        const pdfBytes = await generatePremiumPdf({
           personA,
           dateA,
           personB,
           dateB,
-          score: parseInt(score || "75", 10),
-          longReport,
+          score: reportData.score,
+          reportData,
         });
-        console.log(`Premium PDF generated (${pdfBytes.length} bytes)`);
+        console.log(`Premium PDF generated: ${pdfBytes.length} bytes`);
 
         // 3. Envoyer l'email avec le PDF en pièce jointe
-        console.log("Sending email...");
+        console.log(`Sending premium report email to ${email}...`);
         await sendReportEmail({
           to: email,
           personA,
@@ -91,11 +94,12 @@ export async function POST(request: NextRequest) {
           pdfBytes,
         });
 
-        console.log(`Premium report email sent successfully to ${email}`);
+        console.log(`✅ Premium report successfully sent to ${email}`);
       } catch (processingError) {
-        console.error("Error processing premium payment:", processingError);
-        // On ne renvoie pas d'erreur à Stripe pour éviter les retry
-        // Mais on log pour pouvoir investiguer
+        console.error("❌ Error processing premium payment:", processingError);
+        // On ne renvoie pas d'erreur à Stripe pour éviter les retry infinis
+        // L'erreur est loggée pour investigation
+        // En production, on pourrait envoyer une alerte à un système de monitoring
       }
     }
 
