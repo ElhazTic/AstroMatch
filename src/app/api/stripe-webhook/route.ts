@@ -3,7 +3,17 @@ import { constructWebhookEvent } from "@/lib/stripe";
 import { generatePremiumPdf } from "@/lib/pdf";
 import { sendReportEmail } from "@/lib/email";
 import { generateLongReport } from "@/lib/generateLongReport";
+import { appendLog, readLogs, SessionContext } from "@/lib/logger";
+import { UTMData } from "@/lib/session";
+import { 
+  sendPaymentAlert, 
+  sendPdfGeneratedAlert, 
+  sendErrorAlert,
+  getTodayMidnight 
+} from "@/lib/notifyTelegram";
 import Stripe from "stripe";
+
+const PRICE_PER_REPORT = 4.90;
 
 export async function POST(request: NextRequest) {
   try {
@@ -46,7 +56,7 @@ export async function POST(request: NextRequest) {
         );
       }
 
-      const { email, personA, dateA, personB, dateB } = metadata;
+      const { email, personA, dateA, personB, dateB, sessionId, utm_source, utm_medium, utm_campaign, utm_content, utm_term } = metadata;
 
       // Validation des metadata
       if (!email || !personA || !personB || !dateA || !dateB) {
@@ -57,7 +67,55 @@ export async function POST(request: NextRequest) {
         );
       }
 
-      console.log(`Processing premium payment for ${email} - ${personA} & ${personB}`);
+      // Build UTM data from metadata
+      const utm: UTMData | undefined = (utm_source || utm_medium || utm_campaign || utm_content || utm_term)
+        ? {
+            source: utm_source,
+            medium: utm_medium,
+            campaign: utm_campaign,
+            content: utm_content,
+            term: utm_term,
+          }
+        : undefined;
+
+      // Build session context for logging
+      const sessionContext: SessionContext | undefined = sessionId
+        ? {
+            sessionId,
+            userAgent: "Stripe Webhook",
+            ipAddress: "Stripe",
+            utm,
+          }
+        : undefined;
+
+      console.log(`Processing premium payment for ${email} - ${personA} & ${personB}${utm?.source ? ` (UTM: ${utm.source})` : ''}`);
+
+      // Log payment confirmed with UTM tracking
+      await appendLog(
+        {
+          type: "payment",
+          message: "Payment confirmed",
+          payload: { email, personA, personB },
+        },
+        sessionContext
+      );
+
+      // Calculate today's revenue for the alert
+      let revenueToday = PRICE_PER_REPORT;
+      try {
+        const logs = await readLogs();
+        const todayMidnight = getTodayMidnight();
+        const paymentsToday = logs.filter((log) => {
+          if (log.type !== "payment") return false;
+          return new Date(log.timestamp) >= todayMidnight;
+        }).length;
+        revenueToday = paymentsToday * PRICE_PER_REPORT;
+      } catch (err) {
+        console.error("Error calculating today's revenue:", err);
+      }
+
+      // Send Telegram payment alert
+      await sendPaymentAlert(email, personA, personB, revenueToday);
 
       try {
         // 1. Générer le rapport premium structuré via OpenAI
@@ -85,6 +143,19 @@ export async function POST(request: NextRequest) {
         });
         console.log(`Premium PDF generated: ${pdfBytes.length} bytes`);
 
+        // Send Telegram PDF generated alert
+        await sendPdfGeneratedAlert(personA, personB);
+
+        // Log PDF generated with UTM tracking
+        await appendLog(
+          {
+            type: "pdf",
+            message: "PDF generated & email sent",
+            payload: { email, personA, personB, sizeInBytes: pdfBytes.length },
+          },
+          sessionContext
+        );
+
         // 3. Envoyer l'email avec le PDF en pièce jointe
         console.log(`Sending premium report email to ${email}...`);
         await sendReportEmail({
@@ -97,9 +168,23 @@ export async function POST(request: NextRequest) {
         console.log(`✅ Premium report successfully sent to ${email}`);
       } catch (processingError) {
         console.error("❌ Error processing premium payment:", processingError);
-        // On ne renvoie pas d'erreur à Stripe pour éviter les retry infinis
-        // L'erreur est loggée pour investigation
-        // En production, on pourrait envoyer une alerte à un système de monitoring
+        
+        const errorMsg = processingError instanceof Error 
+          ? processingError.message 
+          : "Unknown error during PDF/email processing";
+        
+        // Log error with UTM tracking
+        await appendLog(
+          {
+            type: "error",
+            message: errorMsg,
+            payload: { email, personA, personB },
+          },
+          sessionContext
+        );
+        
+        // Send Telegram error alert
+        await sendErrorAlert(`Payment processing failed for ${email}: ${errorMsg}`);
       }
     }
 

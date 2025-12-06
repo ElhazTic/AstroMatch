@@ -34,3 +34,8 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# logs and IA analysis (keep structure, ignore content)
+/data/logs.json
+/data/ia-analysis.json
+/data/metrics-snapshot.json

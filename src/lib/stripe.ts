@@ -34,6 +34,13 @@ export interface CheckoutSessionParams {
   advice: string;
   successUrl: string;
   cancelUrl: string;
+  // UTM tracking (optional)
+  sessionId?: string;
+  utm_source?: string;
+  utm_medium?: string;
+  utm_campaign?: string;
+  utm_content?: string;
+  utm_term?: string;
 }
 
 export async function createCheckoutSession(
@@ -49,6 +56,28 @@ export async function createCheckoutSession(
 
   const stripe = getStripeClient();
 
+  // Build metadata with UTM tracking
+  const metadata: Record<string, string> = {
+    email: params.email,
+    personA: params.personA,
+    dateA: params.dateA,
+    personB: params.personB,
+    dateB: params.dateB,
+    score: params.score.toString(),
+    summary: params.summary.substring(0, 500), // Stripe metadata limit
+    strengths: params.strengths.substring(0, 500),
+    weaknesses: params.weaknesses.substring(0, 500),
+    advice: params.advice.substring(0, 500),
+  };
+
+  // Add UTM tracking if provided
+  if (params.sessionId) metadata.sessionId = params.sessionId;
+  if (params.utm_source) metadata.utm_source = params.utm_source;
+  if (params.utm_medium) metadata.utm_medium = params.utm_medium;
+  if (params.utm_campaign) metadata.utm_campaign = params.utm_campaign;
+  if (params.utm_content) metadata.utm_content = params.utm_content;
+  if (params.utm_term) metadata.utm_term = params.utm_term;
+
   const session = await stripe.checkout.sessions.create({
     mode: "payment",
     payment_method_types: ["card"],
@@ -59,18 +88,7 @@ export async function createCheckoutSession(
         quantity: 1,
       },
     ],
-    metadata: {
-      email: params.email,
-      personA: params.personA,
-      dateA: params.dateA,
-      personB: params.personB,
-      dateB: params.dateB,
-      score: params.score.toString(),
-      summary: params.summary.substring(0, 500), // Stripe metadata limit
-      strengths: params.strengths.substring(0, 500),
-      weaknesses: params.weaknesses.substring(0, 500),
-      advice: params.advice.substring(0, 500),
-    },
+    metadata,
     success_url: params.successUrl,
     cancel_url: params.cancelUrl,
   });

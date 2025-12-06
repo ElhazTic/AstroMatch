@@ -11,11 +11,13 @@
   "dependencies": {
     "@pdf-lib/fontkit": "^1.1.1",
     "@stripe/stripe-js": "^8.5.3",
+    "lucide-react": "^0.556.0",
     "next": "14.2.33",
     "openai": "^6.10.0",
     "pdf-lib": "^1.17.1",
     "react": "^18",
     "react-dom": "^18",
+    "recharts": "^3.5.1",
     "resend": "^6.5.2",
     "stripe": "^20.0.0"
   },
