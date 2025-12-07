@@ -131,14 +131,14 @@ async function calculateMetrics(): Promise<MetricsResponse> {
       where: { type: "visit", sessionId: { not: null } },
       select: { sessionId: true },
       distinct: ["sessionId"],
-    }).then(results => results.length),
+    }).then((results: Array<{ sessionId: string | null }>) => results.length),
     
     // Unique forms per session
     prisma.event.findMany({
       where: { type: "form", sessionId: { not: null } },
       select: { sessionId: true },
       distinct: ["sessionId"],
-    }).then(results => results.length),
+    }).then((results: Array<{ sessionId: string | null }>) => results.length),
     
     // Total checkouts
     prisma.event.count({ where: { type: "checkout" } }),
