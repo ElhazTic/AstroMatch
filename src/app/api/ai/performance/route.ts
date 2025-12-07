@@ -264,8 +264,8 @@ async function computeMetrics(): Promise<PerformanceMetrics> {
   }
 
   // Check bounce rate
-  const visitSessionsSet = new Set(recentVisitSessions.map(s => s.sessionId));
-  const formSessionsSet = new Set(recentFormSessions.map(s => s.sessionId));
+  const visitSessionsSet = new Set(recentVisitSessions.map((s: { sessionId: string | null }) => s.sessionId));
+  const formSessionsSet = new Set(recentFormSessions.map((s: { sessionId: string | null }) => s.sessionId));
   const bounceRate = visitSessionsSet.size > 0 ? (visitSessionsSet.size - formSessionsSet.size) / visitSessionsSet.size : 0;
   if (bounceRate > 0.9) {
     anomalies.push(`Taux de rebond très élevé (${Math.round(bounceRate * 100)}%)`);
