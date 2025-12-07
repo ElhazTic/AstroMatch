@@ -316,11 +316,15 @@ function AdminLogsPage() {
       .then((data) => {
         if (Array.isArray(data)) {
           setLogs(data.reverse());
+        } else {
+          // Handle case where data is not an array (empty or error)
+          setLogs([]);
         }
         setLoading(false);
       })
       .catch((err) => {
         console.error("Failed to fetch logs:", err);
+        setLogs([]);
         setLoading(false);
       });
   }, []);

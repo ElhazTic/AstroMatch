@@ -252,15 +252,42 @@ export async function appendLog(
 
 /**
  * Reads all logs from the logs file.
+ * Returns empty array if file doesn't exist or is malformed.
  */
 export async function readLogs(): Promise<LogEntry[]> {
-  await ensureLogsFile();
+  try {
+    // Try to ensure the file exists first
+    await ensureLogsFile();
+  } catch {
+    // If we can't create the file (e.g., read-only filesystem on Vercel),
+    // just try to read it anyway
+    console.log("[LOG] Could not ensure logs file exists, attempting read anyway");
+  }
+
+  let raw = "";
+  try {
+    raw = await fs.readFile(LOGS_FILE_PATH, "utf-8");
+  } catch (error) {
+    // File doesn't exist or can't be read
+    console.log("[LOG] Logs file not found or unreadable, returning empty array");
+    return [];
+  }
+
+  // Handle empty file
+  if (!raw || raw.trim() === "") {
+    return [];
+  }
 
   try {
-    const data = await fs.readFile(LOGS_FILE_PATH, "utf-8");
-    return JSON.parse(data);
-  } catch (error) {
-    console.error("Failed to read logs:", error);
+    const parsed = JSON.parse(raw);
+    // Ensure we return an array
+    if (!Array.isArray(parsed)) {
+      console.warn("[LOG] Logs file did not contain an array, returning empty array");
+      return [];
+    }
+    return parsed;
+  } catch (parseError) {
+    console.error("[LOG] Failed to parse logs JSON:", parseError);
     return [];
   }
 }

@@ -276,11 +276,15 @@ export default function SessionTimelinePage() {
               new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
             );
           setLogs(sessionLogs);
+        } else {
+          // Handle case where data is not an array
+          setLogs([]);
         }
         setLoading(false);
       })
       .catch((err) => {
         console.error("Failed to fetch logs:", err);
+        setLogs([]);
         setLoading(false);
       });
   }, [sessionId]);

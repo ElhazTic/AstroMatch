@@ -332,15 +332,24 @@ export default function AdminDashboard() {
     fetch("/api/metrics")
       .then((res) => res.json())
       .then((data: MetricsResponse) => {
-        setKpis(data.kpis);
-        setTimeseries(data.timeseries.points);
-        setHeatmap(data.heatmap?.byHourOfDay || []);
-        setMarketing(data.marketing?.bySourceCampaign || []);
-        setLogs(data.latestLogs);
+        // Safely set KPIs with fallback values
+        setKpis({
+          totalVisits: data.kpis?.totalVisits ?? 0,
+          uniqueVisitors: data.kpis?.uniqueVisitors ?? 0,
+          totalForms: data.kpis?.totalForms ?? 0,
+          totalCheckouts: data.kpis?.totalCheckouts ?? 0,
+          totalPayments: data.kpis?.totalPayments ?? 0,
+          conversionRate: data.kpis?.conversionRate ?? 0,
+          revenueTotal: data.kpis?.revenueTotal ?? 0,
+        });
+        setTimeseries(data.timeseries?.points ?? []);
+        setHeatmap(data.heatmap?.byHourOfDay ?? []);
+        setMarketing(data.marketing?.bySourceCampaign ?? []);
+        setLogs(data.latestLogs ?? []);
         
         // Initialize seen sessions from existing logs
         const sessions = new Set<string>();
-        data.latestLogs.forEach((log: LogEntry) => {
+        (data.latestLogs ?? []).forEach((log: LogEntry) => {
           if (log.type === "visit" && log.sessionId) {
             sessions.add(log.sessionId);
           }
@@ -349,7 +358,23 @@ export default function AdminDashboard() {
         
         setLastUpdate(new Date());
       })
-      .catch((err) => console.error("Failed to fetch metrics:", err));
+      .catch((err) => {
+        console.error("Failed to fetch metrics:", err);
+        // Set default values on error
+        setKpis({
+          totalVisits: 0,
+          uniqueVisitors: 0,
+          totalForms: 0,
+          totalCheckouts: 0,
+          totalPayments: 0,
+          conversionRate: 0,
+          revenueTotal: 0,
+        });
+        setTimeseries([]);
+        setHeatmap([]);
+        setMarketing([]);
+        setLogs([]);
+      });
   }, []);
 
   // Connect to SSE stream for real-time updates

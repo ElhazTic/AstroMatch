@@ -384,9 +384,24 @@ export async function GET() {
     return NextResponse.json(response);
   } catch (error) {
     console.error("Error in GET /api/metrics:", error);
-    return NextResponse.json(
-      { error: "Failed to compute metrics" },
-      { status: 500 }
-    );
+    
+    // Return default values instead of error to prevent frontend crashes
+    const defaultResponse: MetricsResponse = {
+      kpis: {
+        totalVisits: 0,
+        uniqueVisitors: 0,
+        totalForms: 0,
+        totalCheckouts: 0,
+        totalPayments: 0,
+        conversionRate: 0,
+        revenueTotal: 0,
+      },
+      timeseries: { points: [] },
+      heatmap: { byHourOfDay: [] },
+      marketing: { bySourceCampaign: [] },
+      latestLogs: [],
+    };
+    
+    return NextResponse.json(defaultResponse);
   }
 }

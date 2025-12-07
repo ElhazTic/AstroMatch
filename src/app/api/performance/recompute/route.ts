@@ -469,10 +469,26 @@ export async function POST(request: NextRequest) {
     });
   } catch (error) {
     console.error("Error in POST /api/performance/recompute:", error);
-    return NextResponse.json(
-      { error: "Failed to recompute analysis", status: "error" },
-      { status: 500 }
-    );
+    
+    // Return default analysis instead of error
+    return NextResponse.json({
+      status: "error",
+      updated: false,
+      analysis: {
+        summary: "Analyse temporairement indisponible. Aucune donnée à analyser.",
+        funnelAnalysis: "Données insuffisantes pour analyser le funnel.",
+        heatmapInsights: "Collectez plus de données pour obtenir des insights.",
+        utmInsights: "Aucune donnée marketing disponible.",
+        recommendations: [
+          "Commencez à collecter du trafic",
+          "Configurez vos campagnes UTM",
+          "Attendez quelques visites pour obtenir des insights",
+          "Vérifiez que le tracking est bien configuré",
+        ],
+        roiProjectionText: "Prédictions disponibles après collecte de données.",
+      },
+      isStale: true,
+    });
   }
 }
 
