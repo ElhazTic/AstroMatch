@@ -2,6 +2,7 @@ import { prisma } from "./prisma";
 import { logEmitter } from "./logEmitter";
 import { sendTrafficSpikeAlert } from "./notifyTelegram";
 import { UTMData } from "./session";
+import type { Event as DBEvent } from "@prisma/client";
 
 // Traffic spike detection configuration
 const TRAFFIC_SPIKE_INTERVAL_SECONDS = 20;
@@ -286,7 +287,7 @@ export async function readLogs(limit: number = 1000): Promise<LogEntry[]> {
       take: limit,
     });
 
-    return events.map((event) => ({
+    return events.map((event: DBEvent) => ({
       id: event.id.toString(),
       timestamp: event.timestamp.toISOString(),
       type: event.type as LogEntry["type"],
@@ -295,7 +296,7 @@ export async function readLogs(limit: number = 1000): Promise<LogEntry[]> {
       sessionId: event.sessionId || undefined,
       userAgent: event.userAgent || undefined,
       ipAddress: event.ip || undefined,
-      utm: (event.utmSource || event.utmMedium || event.utmCampaign || event.utmContent || event.utmTerm) 
+      utm: (event.utmSource || event.utmMedium || event.utmCampaign || event.utmContent || event.utmTerm)
         ? {
             source: event.utmSource || undefined,
             medium: event.utmMedium || undefined,
@@ -304,7 +305,7 @@ export async function readLogs(limit: number = 1000): Promise<LogEntry[]> {
             term: event.utmTerm || undefined,
           }
         : undefined,
-    })).reverse(); // Reverse to get chronological order (oldest first)
+    })).reverse();
   } catch (error) {
     console.error("[LOG] Failed to read logs from database:", error);
     return [];
@@ -321,7 +322,7 @@ export async function readLatestEvents(limit: number = 200): Promise<LogEntry[]>
       take: limit,
     });
 
-    return events.map((event) => ({
+    return events.map((event: DBEvent) => ({
       id: event.id.toString(),
       timestamp: event.timestamp.toISOString(),
       type: event.type as LogEntry["type"],
@@ -330,7 +331,7 @@ export async function readLatestEvents(limit: number = 200): Promise<LogEntry[]>
       sessionId: event.sessionId || undefined,
       userAgent: event.userAgent || undefined,
       ipAddress: event.ip || undefined,
-      utm: (event.utmSource || event.utmMedium || event.utmCampaign || event.utmContent || event.utmTerm) 
+      utm: (event.utmSource || event.utmMedium || event.utmCampaign || event.utmContent || event.utmTerm)
         ? {
             source: event.utmSource || undefined,
             medium: event.utmMedium || undefined,
