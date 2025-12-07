@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { appendLog, readLogs, LogEntry, hasFormForSession } from "@/lib/logger";
 import { sendFormAlert } from "@/lib/notifyTelegram";
 import { getSessionContext, setSessionCookie, setUTMCookie } from "@/lib/session";
+import { maskEmailsInObject } from "@/lib/maskEmail";
 
 /**
  * POST /api/log
@@ -103,13 +104,16 @@ export async function POST(request: NextRequest) {
 
 /**
  * GET /api/log
- * Returns all log entries.
+ * Returns all log entries with emails masked for RGPD compliance.
  */
 export async function GET() {
   try {
     const logs: LogEntry[] = await readLogs();
     
-    return NextResponse.json(logs);
+    // Masquer les emails dans les logs pour la conformité RGPD
+    const maskedLogs = logs.map((log) => maskEmailsInObject(log));
+    
+    return NextResponse.json(maskedLogs);
   } catch (error) {
     console.error("Error in GET /api/log:", error);
     return NextResponse.json(

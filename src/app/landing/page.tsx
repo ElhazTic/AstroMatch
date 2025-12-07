@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { FormEvent, useState, useEffect, useRef, Suspense } from "react";
+import Footer from "@/components/Footer";
 
 /**
  * Utility function to send logs to the API with UTM passthrough.
@@ -386,15 +387,17 @@ function LandingPageContent() {
         </div>
       </section>
 
-      <footer className="border-t border-slate-900 bg-slate-950/95">
+      {/* Disclaimer */}
+      <div className="border-t border-slate-900 bg-slate-950/95">
         <div className="mx-auto flex max-w-5xl items-center justify-between px-6 py-6 text-[11px] text-slate-500">
           <p>AstroMatch · Rapport astrologique & analyse relationnelle</p>
           <div className="flex gap-4">
-            <span>© {new Date().getFullYear()}</span>
             <span>Contact : zoe.ronsedmor@gmail.com</span>
           </div>
         </div>
-      </footer>
+      </div>
+
+      <Footer />
     </div>
   );
 }

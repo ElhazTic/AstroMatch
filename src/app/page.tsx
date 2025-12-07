@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef } from "react";
 import LoadingDots from "@/components/LoadingDots";
+import Footer from "@/components/Footer";
 
 interface AnalysisResult {
   score: number;
@@ -45,6 +46,8 @@ export default function HomePage() {
   const [checkoutLoading, setCheckoutLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const [acceptedTerms, setAcceptedTerms] = useState(false);
+  const [termsError, setTermsError] = useState<string | null>(null);
   
   const visitLogged = useRef(false);
   const utmStringRef = useRef<string | undefined>(undefined);
@@ -173,6 +176,12 @@ export default function HomePage() {
       return;
     }
 
+    // Vérification de la case de renonciation
+    if (!acceptedTerms) {
+      setTermsError("Veuillez accepter les conditions pour continuer.");
+      return;
+    }
+
     // Log checkout started
     logEvent("checkout", "Checkout started", {
       email: email.trim(),
@@ -181,6 +190,7 @@ export default function HomePage() {
     }, utmStringRef.current);
 
     setError(null);
+    setTermsError(null);
     setCheckoutLoading(true);
 
     try {
@@ -453,9 +463,33 @@ export default function HomePage() {
 
               <div className="text-center">
                 <p className="text-purple-200 text-2xl font-bold mb-4">4,90 €</p>
+                
+                {/* Checkbox de renonciation */}
+                <div className="mb-4 text-left max-w-md mx-auto">
+                  <label className="flex items-start gap-3 cursor-pointer group">
+                    <input
+                      type="checkbox"
+                      checked={acceptedTerms}
+                      onChange={(e) => {
+                        setAcceptedTerms(e.target.checked);
+                        if (e.target.checked) setTermsError(null);
+                      }}
+                      className="mt-1 w-4 h-4 rounded border-slate-600 bg-slate-800 text-purple-500 focus:ring-purple-500/40 focus:ring-2 cursor-pointer"
+                    />
+                    <span className="text-xs text-slate-300 leading-relaxed group-hover:text-slate-200 transition-colors">
+                      J&apos;accepte la livraison immédiate du contenu numérique et je renonce expressément à mon droit de rétractation.
+                    </span>
+                  </label>
+                  {termsError && (
+                    <p className="text-red-400 text-xs mt-2 flex items-center gap-1">
+                      <span>⚠️</span> {termsError}
+                    </p>
+                  )}
+                </div>
+
                 <button
                   onClick={handleBuy}
-                  disabled={checkoutLoading || !email}
+                  disabled={checkoutLoading || !email || !acceptedTerms}
                   className="w-full md:w-auto px-8 py-3 rounded-xl bg-gradient-to-r from-purple-500 via-fuchsia-500 to-amber-400 text-sm font-semibold text-slate-950 shadow-lg shadow-purple-900/40 transition hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   {checkoutLoading ? (
@@ -477,25 +511,25 @@ export default function HomePage() {
           </div>
         )}
 
-        {/* Footer */}
-        <footer className="mt-16 border-t border-slate-800 pt-8">
-          <div className="text-center text-slate-500 text-xs">
-            <p>AstroMatch · Rapport astrologique & analyse relationnelle</p>
-            <p className="mt-2">
-              Ne remplace pas un avis professionnel, mais peut aider à réfléchir à
-              vos relations.
-            </p>
-            <p className="mt-4">
-              <a
-                href="/landing"
-                className="text-purple-300/70 hover:text-purple-300 transition-colors"
-              >
-                En savoir plus →
-              </a>
-            </p>
-          </div>
-        </footer>
+        {/* Disclaimer */}
+        <div className="mt-16 text-center text-slate-500 text-xs">
+          <p>AstroMatch · Rapport astrologique & analyse relationnelle</p>
+          <p className="mt-2">
+            Ne remplace pas un avis professionnel, mais peut aider à réfléchir à
+            vos relations.
+          </p>
+          <p className="mt-4">
+            <a
+              href="/landing"
+              className="text-purple-300/70 hover:text-purple-300 transition-colors"
+            >
+              En savoir plus →
+            </a>
+          </p>
+        </div>
       </div>
+      
+      <Footer />
     </main>
   );
 }

@@ -1,5 +1,6 @@
 import { logEmitter } from "@/lib/logEmitter";
 import { LogEntry } from "@/lib/logger";
+import { maskEmailsInObject } from "@/lib/maskEmail";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -21,7 +22,9 @@ export async function GET() {
       // Handler for new log events
       const onLog = (log: LogEntry) => {
         try {
-          const data = JSON.stringify(log);
+          // Masquer les emails pour la conformité RGPD
+          const maskedLog = maskEmailsInObject(log);
+          const data = JSON.stringify(maskedLog);
           controller.enqueue(encoder.encode(`data: ${data}\n\n`));
         } catch (error) {
           console.error("Error sending SSE event:", error);
@@ -64,5 +67,6 @@ export async function GET() {
     },
   });
 }
+
 
 
