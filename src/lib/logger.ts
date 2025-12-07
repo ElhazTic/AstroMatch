@@ -2,7 +2,8 @@ import { prisma } from "./prisma";
 import { logEmitter } from "./logEmitter";
 import { sendTrafficSpikeAlert } from "./notifyTelegram";
 import { UTMData } from "./session";
-import type { Event as DBEvent } from "@prisma/client";
+import type { Prisma } from "@prisma/client";
+type DBEvent = Prisma.EventGetPayload<{}>;
 
 // Traffic spike detection configuration
 const TRAFFIC_SPIKE_INTERVAL_SECONDS = 20;
@@ -306,6 +307,7 @@ export async function readLogs(limit: number = 1000): Promise<LogEntry[]> {
           }
         : undefined,
     })).reverse();
+    
   } catch (error) {
     console.error("[LOG] Failed to read logs from database:", error);
     return [];
