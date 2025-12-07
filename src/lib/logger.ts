@@ -5,7 +5,11 @@ import { sendTrafficSpikeAlert } from "./notifyTelegram";
 import { UTMData } from "./session";
 import { markAnalysisAsStale, loadIAAnalysis } from "./iaAnalysis";
 
-const LOGS_FILE_PATH = path.join(process.cwd(), "data", "logs.json");
+// On Vercel, only /tmp is writable. Use /tmp for production, data/ for local dev.
+const isVercel = process.env.VERCEL === "1";
+const LOGS_FILE_PATH = isVercel 
+  ? "/tmp/logs.json"
+  : path.join(process.cwd(), "data", "logs.json");
 
 // Traffic spike detection configuration
 const TRAFFIC_SPIKE_INTERVAL_SECONDS = 20;
@@ -48,20 +52,26 @@ export interface SessionContext {
 
 /**
  * Ensures the data directory and logs.json file exist.
+ * On Vercel, /tmp is used and may fail gracefully.
  */
 async function ensureLogsFile(): Promise<void> {
-  const dataDir = path.dirname(LOGS_FILE_PATH);
-  
   try {
-    await fs.access(dataDir);
-  } catch {
-    await fs.mkdir(dataDir, { recursive: true });
-  }
+    const dataDir = path.dirname(LOGS_FILE_PATH);
+    
+    try {
+      await fs.access(dataDir);
+    } catch {
+      await fs.mkdir(dataDir, { recursive: true });
+    }
 
-  try {
-    await fs.access(LOGS_FILE_PATH);
+    try {
+      await fs.access(LOGS_FILE_PATH);
+    } catch {
+      await fs.writeFile(LOGS_FILE_PATH, JSON.stringify([], null, 2), "utf-8");
+    }
   } catch {
-    await fs.writeFile(LOGS_FILE_PATH, JSON.stringify([], null, 2), "utf-8");
+    // On Vercel or read-only filesystem, this may fail - that's OK
+    console.log("[LOG] Could not ensure logs file (read-only filesystem?)");
   }
 }
 
@@ -202,52 +212,63 @@ export async function appendLog(
     ...(sessionContext?.utm && { utm: sessionContext.utm }),
   };
 
+  // Enhanced logging with session info
+  const sessionInfo = sessionContext?.sessionId 
+    ? ` [${sessionContext.sessionId.slice(0, 8)}...]` 
+    : "";
+  console.log(`[LOG] ${logEntry.type}${sessionInfo}: ${logEntry.message}`);
+
+  // Always emit event for SSE clients (works even if file write fails)
+  logEmitter.emit("log", logEntry);
+
+  // Try to persist to file (may fail on read-only filesystem like Vercel)
+  let trimmedLogs: LogEntry[] = [logEntry];
   try {
-    const data = await fs.readFile(LOGS_FILE_PATH, "utf-8");
-    const logs: LogEntry[] = JSON.parse(data);
+    let logs: LogEntry[] = [];
+    
+    try {
+      const data = await fs.readFile(LOGS_FILE_PATH, "utf-8");
+      logs = JSON.parse(data);
+      if (!Array.isArray(logs)) logs = [];
+    } catch {
+      // File doesn't exist or is malformed - start fresh
+      logs = [];
+    }
     
     logs.push(logEntry);
     
     // Keep only last 1000 logs to prevent file from growing too large
-    const trimmedLogs = logs.slice(-1000);
+    trimmedLogs = logs.slice(-1000);
     
     await fs.writeFile(LOGS_FILE_PATH, JSON.stringify(trimmedLogs, null, 2), "utf-8");
-    
-    // Emit event for SSE clients
-    logEmitter.emit("log", logEntry);
-    
-    // Enhanced logging with session info
-    const sessionInfo = sessionContext?.sessionId 
-      ? ` [${sessionContext.sessionId.slice(0, 8)}...]` 
-      : "";
-    console.log(`[LOG] ${logEntry.type}${sessionInfo}: ${logEntry.message}`);
-
-    // Check for traffic spike on visit events
-    if (event.type === "visit") {
-      // Run asynchronously to not block the response
-      checkTrafficSpike(trimmedLogs, currentTimestamp).catch((err) => {
-        console.error("[TRAFFIC SPIKE] Error checking traffic spike:", err);
-      });
-    }
-
-    // Mark IA analysis as stale for metric-affecting events
-    if (METRIC_AFFECTING_TYPES.includes(event.type)) {
-      // Run asynchronously to not block the response
-      markIAAnalysisAsStale().then(() => {
-        // Check if we should trigger auto recompute
-        triggerIARecomputeIfNeeded().catch((err) => {
-          console.error("[IA] Error triggering recompute:", err);
-        });
-      }).catch((err) => {
-        console.error("[IA] Error marking analysis as stale:", err);
-      });
-    }
-    
-    return logEntry;
-  } catch (error) {
-    console.error("Failed to append log:", error);
-    throw error;
+  } catch (writeError) {
+    // On Vercel or read-only filesystem, file write will fail - that's OK
+    // The log was still emitted via SSE and logged to console
+    console.log("[LOG] Could not persist log to file (read-only filesystem?)");
   }
+
+  // Check for traffic spike on visit events
+  if (event.type === "visit") {
+    // Run asynchronously to not block the response
+    checkTrafficSpike(trimmedLogs, currentTimestamp).catch((err) => {
+      console.error("[TRAFFIC SPIKE] Error checking traffic spike:", err);
+    });
+  }
+
+  // Mark IA analysis as stale for metric-affecting events
+  if (METRIC_AFFECTING_TYPES.includes(event.type)) {
+    // Run asynchronously to not block the response
+    markIAAnalysisAsStale().then(() => {
+      // Check if we should trigger auto recompute
+      triggerIARecomputeIfNeeded().catch((err) => {
+        console.error("[IA] Error triggering recompute:", err);
+      });
+    }).catch((err) => {
+      console.error("[IA] Error marking analysis as stale:", err);
+    });
+  }
+  
+  return logEntry;
 }
 
 /**
