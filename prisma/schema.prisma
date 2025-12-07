@@ -1,0 +1,69 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// Événements de tracking (visites, formulaires, checkouts, paiements, etc.)
+model Event {
+  id          Int      @id @default(autoincrement())
+  type        String   // visit, form, intent, checkout, payment, pdf, error
+  message     String?
+  sessionId   String?
+  timestamp   DateTime @default(now())
+  ip          String?
+  userAgent   String?
+  utmSource   String?
+  utmMedium   String?
+  utmCampaign String?
+  utmContent  String?
+  utmTerm     String?
+  metadata    Json?    // Pour stocker le payload flexible
+
+  @@index([type])
+  @@index([sessionId])
+  @@index([timestamp])
+  @@index([utmSource, utmCampaign])
+}
+
+// Paiements Stripe
+model Payment {
+  id              Int      @id @default(autoincrement())
+  stripeSessionId String   @unique
+  amount          Int      // En centimes
+  currency        String   @default("eur")
+  email           String?
+  personA         String?
+  personB         String?
+  createdAt       DateTime @default(now())
+  sessionId       String?  // Session utilisateur associée
+
+  @@index([email])
+  @@index([createdAt])
+}
+
+// Cache des métriques calculées
+model MetricsCache {
+  key       String   @id
+  value     Json
+  updatedAt DateTime @default(now())
+}
+
+// Sessions utilisateur
+model UserSession {
+  sessionId   String   @id
+  createdAt   DateTime @default(now())
+  lastSeen    DateTime @default(now())
+  userAgent   String?
+  ip          String?
+  utmSource   String?
+  utmCampaign String?
+
+  @@index([createdAt])
+  @@index([lastSeen])
+}

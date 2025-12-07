@@ -200,6 +200,7 @@ export default function AdminDashboard() {
   const [connected, setConnected] = useState(false);
   const [lastUpdate, setLastUpdate] = useState<Date | null>(null);
   const [resetting, setResetting] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   // Track unique visitors (seenSessions is used only via setSeenSessions to maintain state)
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const [seenSessions, setSeenSessions] = useState<Set<string>>(new Set());
@@ -238,6 +239,35 @@ export default function AdminDashboard() {
       alert("Erreur lors de la suppression des logs");
     } finally {
       setResetting(false);
+    }
+  };
+
+  // Refresh metrics manually
+  const handleRefresh = async () => {
+    setRefreshing(true);
+    try {
+      const res = await fetch("/api/metrics");
+      if (res.ok) {
+        const data: MetricsResponse = await res.json();
+        setKpis({
+          totalVisits: data.kpis?.totalVisits ?? 0,
+          uniqueVisitors: data.kpis?.uniqueVisitors ?? 0,
+          totalForms: data.kpis?.totalForms ?? 0,
+          totalCheckouts: data.kpis?.totalCheckouts ?? 0,
+          totalPayments: data.kpis?.totalPayments ?? 0,
+          conversionRate: data.kpis?.conversionRate ?? 0,
+          revenueTotal: data.kpis?.revenueTotal ?? 0,
+        });
+        setTimeseries(data.timeseries?.points ?? []);
+        setHeatmap(data.heatmap?.byHourOfDay ?? []);
+        setMarketing(data.marketing?.bySourceCampaign ?? []);
+        setLogs(data.latestLogs ?? []);
+        setLastUpdate(new Date());
+      }
+    } catch (err) {
+      console.error("Failed to refresh metrics:", err);
+    } finally {
+      setRefreshing(false);
     }
   };
 
@@ -488,6 +518,22 @@ export default function AdminDashboard() {
               >
                 🧠 Performance IA
               </a>
+
+              {/* Refresh button */}
+              <button
+                onClick={handleRefresh}
+                disabled={refreshing}
+                className="px-4 py-2 rounded-full border border-blue-500/40 bg-blue-500/10 text-blue-400 hover:bg-blue-500/20 transition-all disabled:opacity-50 disabled:cursor-not-allowed text-sm flex items-center gap-2"
+              >
+                {refreshing ? (
+                  <>
+                    <span className="w-3 h-3 border-2 border-blue-400 border-t-transparent rounded-full animate-spin" />
+                    Refresh...
+                  </>
+                ) : (
+                  "🔄 Refresh"
+                )}
+              </button>
 
               {/* Reset logs button */}
               <button

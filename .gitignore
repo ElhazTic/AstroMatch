@@ -26,6 +26,7 @@ yarn-debug.log*
 yarn-error.log*
 
 # local env files
+.env
 .env*.local
 
 # vercel
@@ -35,7 +36,5 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
-# logs and IA analysis (keep structure, ignore content)
-/data/logs.json
-/data/ia-analysis.json
-/data/metrics-snapshot.json
+# prisma
+/src/generated/prisma

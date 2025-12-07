@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { readLogs, LogEntry } from "@/lib/logger";
+import { prisma } from "@/lib/prisma";
 import { getOpenAIClient } from "@/lib/openai";
 import {
   loadIAAnalysis,
@@ -53,145 +53,128 @@ interface PerformanceMetrics {
   utmData: UTMData[];
 }
 
-
 /**
- * Count unique visitors based on sessionId
+ * Compute all metrics from database
  */
-function countUniqueVisitors(logs: LogEntry[]): number {
-  const uniqueSessions = new Set<string>();
-  let visitsWithoutSession = 0;
+async function computeMetrics(): Promise<PerformanceMetrics> {
+  const now = new Date();
+  const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+  const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
 
-  for (const log of logs) {
-    if (log.type === "visit") {
-      if (log.sessionId) {
-        uniqueSessions.add(log.sessionId);
-      } else {
-        visitsWithoutSession++;
-      }
-    }
-  }
+  // Get all counts in parallel
+  const [
+    totalVisits,
+    uniqueVisitorsList,
+    uniqueFormsList,
+    totalCheckouts,
+    totalPayments,
+    heatmapEvents,
+    marketingEvents,
+  ] = await Promise.all([
+    prisma.event.count({ where: { type: "visit" } }),
+    prisma.event.findMany({
+      where: { type: "visit", sessionId: { not: null } },
+      select: { sessionId: true },
+      distinct: ["sessionId"],
+    }),
+    prisma.event.findMany({
+      where: { type: "form", sessionId: { not: null } },
+      select: { sessionId: true },
+      distinct: ["sessionId"],
+    }),
+    prisma.event.count({ where: { type: "checkout" } }),
+    prisma.event.count({ where: { type: "payment" } }),
+    prisma.event.findMany({
+      where: { timestamp: { gte: sevenDaysAgo } },
+      select: { type: true, timestamp: true, sessionId: true },
+    }),
+    prisma.event.findMany({
+      where: { timestamp: { gte: thirtyDaysAgo } },
+      select: {
+        type: true,
+        sessionId: true,
+        utmSource: true,
+        utmCampaign: true,
+      },
+    }),
+  ]);
 
-  return uniqueSessions.size + visitsWithoutSession;
-}
+  const uniqueVisitors = uniqueVisitorsList.length;
+  const totalForms = uniqueFormsList.length;
 
-/**
- * Count unique forms per session
- */
-function countUniqueForms(logs: LogEntry[]): number {
-  const sessionsWithForm = new Set<string>();
-  let formsWithoutSession = 0;
+  const revenueTotal = Math.round(totalPayments * PRICE_PER_PAYMENT * 100) / 100;
+  const conversionRate = uniqueVisitors > 0 
+    ? Math.round((totalPayments / uniqueVisitors) * 10000) / 100 
+    : 0;
 
-  for (const log of logs) {
-    if (log.type === "form") {
-      if (log.sessionId) {
-        sessionsWithForm.add(log.sessionId);
-      } else {
-        formsWithoutSession++;
-      }
-    }
-  }
+  const funnelRatios = {
+    visitToForm: totalVisits > 0 ? totalForms / totalVisits : 0,
+    formToCheckout: totalForms > 0 ? totalCheckouts / totalForms : 0,
+    checkoutToPayment: totalCheckouts > 0 ? totalPayments / totalCheckouts : 0,
+  };
 
-  return sessionsWithForm.size + formsWithoutSession;
-}
-
-/**
- * Compute heatmap by hour of day (0-23)
- */
-function computeHeatmap(logs: LogEntry[]): HeatmapPoint[] {
-  const buckets: Array<{
+  // Compute heatmap
+  const heatmapBuckets: Array<{
     visits: number;
     forms: number;
     payments: number;
     formSessions: Set<string>;
   }> = [];
-
   for (let h = 0; h < 24; h++) {
-    buckets[h] = { visits: 0, forms: 0, payments: 0, formSessions: new Set() };
+    heatmapBuckets[h] = { visits: 0, forms: 0, payments: 0, formSessions: new Set() };
   }
 
-  const now = new Date();
-  const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-
-  for (const log of logs) {
-    const logDate = new Date(log.timestamp);
-    if (logDate < sevenDaysAgo) continue;
-
-    const hourOfDay = logDate.getHours();
-
-    if (log.type === "visit") {
-      buckets[hourOfDay].visits++;
-    }
-    if (log.type === "form") {
-      if (log.sessionId) {
-        buckets[hourOfDay].formSessions.add(log.sessionId);
+  for (const event of heatmapEvents) {
+    const hourOfDay = event.timestamp.getHours();
+    if (event.type === "visit") heatmapBuckets[hourOfDay].visits++;
+    if (event.type === "form") {
+      if (event.sessionId) {
+        heatmapBuckets[hourOfDay].formSessions.add(event.sessionId);
       } else {
-        buckets[hourOfDay].forms++;
+        heatmapBuckets[hourOfDay].forms++;
       }
     }
-    if (log.type === "payment") {
-      buckets[hourOfDay].payments++;
-    }
+    if (event.type === "payment") heatmapBuckets[hourOfDay].payments++;
   }
 
-  return buckets.map((bucket, hour) => ({
+  const heatmap: HeatmapPoint[] = heatmapBuckets.map((bucket, hour) => ({
     hour,
     visits: bucket.visits,
     forms: bucket.formSessions.size + bucket.forms,
     payments: bucket.payments,
     revenue: Math.round(bucket.payments * PRICE_PER_PAYMENT * 100) / 100,
   }));
-}
 
-/**
- * Get hot hours (top 5 by visits)
- */
-function getHotHours(heatmap: HeatmapPoint[]): number[] {
-  return [...heatmap]
+  // Get hot hours
+  const hotHours = [...heatmap]
     .sort((a, b) => b.visits - a.visits)
     .slice(0, 5)
     .filter((h) => h.visits > 0)
     .map((h) => h.hour);
-}
 
-/**
- * Compute UTM data aggregation
- */
-function computeUTMData(logs: LogEntry[]): UTMData[] {
-  const now = new Date();
-  const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
-
-  const recentLogs = logs.filter((log) => new Date(log.timestamp) >= thirtyDaysAgo);
-
+  // Compute UTM data
   const sessionUTM: Map<string, { source: string; campaign: string }> = new Map();
-  const sessionMetrics: Map<
-    string,
-    { hasVisit: boolean; hasForm: boolean; hasCheckout: boolean; hasPayment: boolean }
-  > = new Map();
+  const sessionMetrics: Map<string, { hasVisit: boolean; hasForm: boolean; hasCheckout: boolean; hasPayment: boolean }> = new Map();
 
-  for (const log of recentLogs) {
-    if (!log.sessionId) continue;
+  for (const event of marketingEvents) {
+    if (!event.sessionId) continue;
 
-    if (!sessionUTM.has(log.sessionId)) {
-      sessionUTM.set(log.sessionId, {
-        source: log.utm?.source || "direct",
-        campaign: log.utm?.campaign || "none",
+    if (!sessionUTM.has(event.sessionId)) {
+      sessionUTM.set(event.sessionId, {
+        source: event.utmSource || "direct",
+        campaign: event.utmCampaign || "none",
       });
     }
 
-    if (!sessionMetrics.has(log.sessionId)) {
-      sessionMetrics.set(log.sessionId, {
-        hasVisit: false,
-        hasForm: false,
-        hasCheckout: false,
-        hasPayment: false,
-      });
+    if (!sessionMetrics.has(event.sessionId)) {
+      sessionMetrics.set(event.sessionId, { hasVisit: false, hasForm: false, hasCheckout: false, hasPayment: false });
     }
 
-    const metrics = sessionMetrics.get(log.sessionId)!;
-    if (log.type === "visit") metrics.hasVisit = true;
-    if (log.type === "form") metrics.hasForm = true;
-    if (log.type === "checkout") metrics.hasCheckout = true;
-    if (log.type === "payment") metrics.hasPayment = true;
+    const metrics = sessionMetrics.get(event.sessionId)!;
+    if (event.type === "visit") metrics.hasVisit = true;
+    if (event.type === "form") metrics.hasForm = true;
+    if (event.type === "checkout") metrics.hasCheckout = true;
+    if (event.type === "payment") metrics.hasPayment = true;
   }
 
   const aggregation: Map<string, UTMData> = new Map();
@@ -224,36 +207,12 @@ function computeUTMData(logs: LogEntry[]): UTMData[] {
     }
   });
 
-  return Array.from(aggregation.values())
+  const utmData = Array.from(aggregation.values())
     .map((agg) => ({
       ...agg,
       conversionRate: agg.visits > 0 ? Math.round((agg.payments / agg.visits) * 10000) / 100 : 0,
     }))
     .sort((a, b) => b.revenue - a.revenue || b.payments - a.payments);
-}
-
-/**
- * Compute all metrics from logs
- */
-function computeMetrics(logs: LogEntry[]): PerformanceMetrics {
-  const totalVisits = logs.filter((log) => log.type === "visit").length;
-  const uniqueVisitors = countUniqueVisitors(logs);
-  const totalForms = countUniqueForms(logs);
-  const totalCheckouts = logs.filter((log) => log.type === "checkout").length;
-  const totalPayments = logs.filter((log) => log.type === "payment").length;
-  const revenueTotal = Math.round(totalPayments * PRICE_PER_PAYMENT * 100) / 100;
-  const conversionRate =
-    uniqueVisitors > 0 ? Math.round((totalPayments / uniqueVisitors) * 10000) / 100 : 0;
-
-  const funnelRatios = {
-    visitToForm: totalVisits > 0 ? totalForms / totalVisits : 0,
-    formToCheckout: totalForms > 0 ? totalCheckouts / totalForms : 0,
-    checkoutToPayment: totalCheckouts > 0 ? totalPayments / totalCheckouts : 0,
-  };
-
-  const heatmap = computeHeatmap(logs);
-  const hotHours = getHotHours(heatmap);
-  const utmData = computeUTMData(logs);
 
   return {
     totalVisits,
@@ -370,32 +329,23 @@ Réponds UNIQUEMENT avec ce JSON:
   } catch (error) {
     console.error("OpenAI API error:", error);
     return {
-      summary:
-        "Analyse temporairement indisponible. Les données montrent une activité normale.",
-      funnelAnalysis:
-        "Le funnel présente des opportunités d'amélioration à chaque étape.",
-      heatmapInsights:
-        "Les heures de pointe identifiées peuvent guider vos campagnes publicitaires.",
-      utmInsights:
-        "Analysez les sources de trafic performantes pour optimiser le budget marketing.",
+      summary: "Analyse temporairement indisponible. Les données montrent une activité normale.",
+      funnelAnalysis: "Le funnel présente des opportunités d'amélioration à chaque étape.",
+      heatmapInsights: "Les heures de pointe identifiées peuvent guider vos campagnes publicitaires.",
+      utmInsights: "Analysez les sources de trafic performantes pour optimiser le budget marketing.",
       recommendations: [
         "Optimisez le formulaire pour augmenter les conversions",
         "Testez différentes heures de publication",
         "Suivez les campagnes UTM performantes",
         "Réduisez le temps de chargement des pages",
       ],
-      roiProjectionText:
-        "Prédictions détaillées disponibles après analyse complète des données.",
+      roiProjectionText: "Prédictions détaillées disponibles après analyse complète des données.",
     };
   }
 }
 
 /**
  * POST /api/performance/recompute
- * 
- * Query params:
- * - manual=1 : Force recompute (bypass cooldown check for staleness, but still respects absolute cooldown)
- * - auto=1 : Automatic trigger (respects cooldown)
  */
 export async function POST(request: NextRequest) {
   try {
@@ -403,16 +353,13 @@ export async function POST(request: NextRequest) {
     const isManual = searchParams.get("manual") === "1";
     const isAuto = searchParams.get("auto") === "1";
 
-    // Load current state
     const currentAnalysis = await loadIAAnalysis();
-    const logs = await readLogs();
-    const currentMetrics = computeMetrics(logs);
+    const currentMetrics = await computeMetrics();
 
     // Check cooldown for auto triggers
     if (isAuto && currentAnalysis) {
       const timeSinceLastUpdate = Date.now() - currentAnalysis.lastUpdated;
       if (timeSinceLastUpdate < COOLDOWN_MS) {
-        // Still on cooldown, just mark as stale and return current
         await markAnalysisAsStale();
         return NextResponse.json({
           status: "cooldown",
@@ -424,10 +371,7 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // For manual triggers, check if data actually changed (unless there's no analysis yet)
     const hasChanges = metricsHaveChanged(currentMetrics, currentAnalysis?.metricsSnapshot);
-    
-    // Decide whether to recompute
     const shouldRecompute = !currentAnalysis || isManual || hasChanges;
 
     if (!shouldRecompute && currentAnalysis) {
@@ -439,11 +383,9 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    // Generate new IA analysis
     console.log("[IA RECOMPUTE] Generating new analysis...");
     const newAnalysis = await generateIAAnalysis(currentMetrics);
 
-    // Save to storage
     const storage: IAAnalysisStorage = {
       lastUpdated: Date.now(),
       isStale: false,
@@ -470,7 +412,6 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     console.error("Error in POST /api/performance/recompute:", error);
     
-    // Return default analysis instead of error
     return NextResponse.json({
       status: "error",
       updated: false,
@@ -494,7 +435,6 @@ export async function POST(request: NextRequest) {
 
 /**
  * GET /api/performance/recompute
- * Returns the current IA analysis status without recomputing
  */
 export async function GET() {
   try {
@@ -524,4 +464,5 @@ export async function GET() {
     );
   }
 }
+
 

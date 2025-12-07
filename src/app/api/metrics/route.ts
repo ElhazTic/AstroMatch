@@ -1,7 +1,11 @@
 import { NextResponse } from "next/server";
-import { readLogs, LogEntry } from "@/lib/logger";
+import { prisma } from "@/lib/prisma";
+import { maskEmailsInObject } from "@/lib/maskEmail";
 
 export const dynamic = "force-dynamic";
+
+// Cache TTL in milliseconds (30 seconds)
+const CACHE_TTL_MS = 30 * 1000;
 
 interface KPIs {
   totalVisits: number;
@@ -23,7 +27,7 @@ interface TimeseriesPoint {
 }
 
 interface HeatmapPoint {
-  hour: number; // 0-23
+  hour: number;
   visits: number;
   forms: number;
   payments: number;
@@ -40,6 +44,24 @@ interface MarketingSourceCampaign {
   conversionRate: number;
 }
 
+interface LogEntry {
+  id: string;
+  timestamp: string;
+  type: string;
+  message: string;
+  payload?: Record<string, unknown>;
+  sessionId?: string;
+  userAgent?: string;
+  ipAddress?: string;
+  utm?: {
+    source?: string;
+    medium?: string;
+    campaign?: string;
+    content?: string;
+    term?: string;
+  };
+}
+
 interface MetricsResponse {
   kpis: KPIs;
   timeseries: {
@@ -53,6 +75,8 @@ interface MetricsResponse {
   };
   latestLogs: LogEntry[];
 }
+
+const PRICE_PER_PAYMENT = 4.9;
 
 /**
  * Truncates a date to the start of its hour.
@@ -79,307 +103,326 @@ function generateHourSlots(hours: number): string[] {
 }
 
 /**
- * Counts unique forms per session to ensure accurate KPIs.
- * Only counts one form per sessionId.
+ * Calculate metrics from database
  */
-function countUniqueFormsPerSession(logs: LogEntry[]): number {
-  const sessionWithForm = new Set<string>();
-  
-  for (const log of logs) {
-    if (log.type === "form" && log.sessionId) {
-      sessionWithForm.add(log.sessionId);
-    }
-  }
-  
-  // Also count forms without sessionId (legacy logs)
-  const formsWithoutSession = logs.filter(
-    (log) => log.type === "form" && !log.sessionId
-  ).length;
-  
-  return sessionWithForm.size + formsWithoutSession;
-}
+async function calculateMetrics(): Promise<MetricsResponse> {
+  const now = new Date();
+  const twentyFourHoursAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+  const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+  const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
 
-/**
- * Counts unique visitors based on distinct sessionIds among visit logs.
- */
-function countUniqueVisitors(logs: LogEntry[]): number {
-  const uniqueSessions = new Set<string>();
+  // KPIs - Calculate from all events
+  const [
+    totalVisits,
+    uniqueVisitors,
+    totalForms,
+    totalCheckouts,
+    totalPayments,
+    recentEvents,
+    heatmapEvents,
+    marketingEvents,
+    latestEvents,
+  ] = await Promise.all([
+    // Total visits
+    prisma.event.count({ where: { type: "visit" } }),
+    
+    // Unique visitors (distinct sessionIds for visits)
+    prisma.event.findMany({
+      where: { type: "visit", sessionId: { not: null } },
+      select: { sessionId: true },
+      distinct: ["sessionId"],
+    }).then(results => results.length),
+    
+    // Unique forms per session
+    prisma.event.findMany({
+      where: { type: "form", sessionId: { not: null } },
+      select: { sessionId: true },
+      distinct: ["sessionId"],
+    }).then(results => results.length),
+    
+    // Total checkouts
+    prisma.event.count({ where: { type: "checkout" } }),
+    
+    // Total payments
+    prisma.event.count({ where: { type: "payment" } }),
+    
+    // Recent events for timeseries (24h)
+    prisma.event.findMany({
+      where: { timestamp: { gte: twentyFourHoursAgo } },
+      select: { type: true, timestamp: true, sessionId: true },
+    }),
+    
+    // Events for heatmap (7 days)
+    prisma.event.findMany({
+      where: { timestamp: { gte: sevenDaysAgo } },
+      select: { type: true, timestamp: true, sessionId: true },
+    }),
+    
+    // Events for marketing (30 days)
+    prisma.event.findMany({
+      where: { timestamp: { gte: thirtyDaysAgo } },
+      select: {
+        type: true,
+        sessionId: true,
+        utmSource: true,
+        utmCampaign: true,
+      },
+    }),
+    
+    // Latest 50 events
+    prisma.event.findMany({
+      orderBy: { timestamp: "desc" },
+      take: 50,
+      select: {
+        id: true,
+        type: true,
+        message: true,
+        timestamp: true,
+        sessionId: true,
+        userAgent: true,
+        ip: true,
+        utmSource: true,
+        utmMedium: true,
+        utmCampaign: true,
+        utmContent: true,
+        utmTerm: true,
+        metadata: true,
+      },
+    }),
+  ]);
+
+  // Add forms without sessionId (legacy)
+  const formsWithoutSession = await prisma.event.count({
+    where: { type: "form", sessionId: null },
+  });
+  const adjustedTotalForms = totalForms + formsWithoutSession;
+
+  // Calculate conversion rate
+  const conversionRate = uniqueVisitors > 0 
+    ? Math.round((totalPayments / uniqueVisitors) * 10000) / 100 
+    : 0;
   
-  for (const log of logs) {
-    if (log.type === "visit" && log.sessionId) {
-      uniqueSessions.add(log.sessionId);
+  const revenueTotal = Math.round(totalPayments * PRICE_PER_PAYMENT * 100) / 100;
+
+  const kpis: KPIs = {
+    totalVisits,
+    uniqueVisitors,
+    totalForms: adjustedTotalForms,
+    totalCheckouts,
+    totalPayments,
+    conversionRate,
+    revenueTotal,
+  };
+
+  // Build timeseries
+  const hourSlots = generateHourSlots(24);
+  const hourlyData: Record<string, { 
+    visits: number; 
+    forms: number; 
+    checkouts: number; 
+    payments: number;
+    formSessions: Set<string>;
+  }> = {};
+  
+  for (const slot of hourSlots) {
+    hourlyData[slot] = { 
+      visits: 0, 
+      forms: 0, 
+      checkouts: 0, 
+      payments: 0,
+      formSessions: new Set()
+    };
+  }
+
+  for (const event of recentEvents) {
+    const logHour = truncateToHour(event.timestamp);
+    
+    if (hourlyData[logHour]) {
+      if (event.type === "visit") hourlyData[logHour].visits++;
+      if (event.type === "form") {
+        if (event.sessionId) {
+          hourlyData[logHour].formSessions.add(event.sessionId);
+        } else {
+          hourlyData[logHour].forms++;
+        }
+      }
+      if (event.type === "checkout") hourlyData[logHour].checkouts++;
+      if (event.type === "payment") hourlyData[logHour].payments++;
     }
   }
+
+  const points: TimeseriesPoint[] = hourSlots.map((hour) => ({
+    hour,
+    visits: hourlyData[hour].visits,
+    forms: hourlyData[hour].formSessions.size + hourlyData[hour].forms,
+    checkouts: hourlyData[hour].checkouts,
+    payments: hourlyData[hour].payments,
+    revenue: Math.round(hourlyData[hour].payments * PRICE_PER_PAYMENT * 100) / 100,
+  }));
+
+  // Build heatmap (24 hours)
+  const heatmapBuckets: Array<{
+    visits: number;
+    forms: number;
+    payments: number;
+    formSessions: Set<string>;
+  }> = [];
   
-  // Also count visits without sessionId (legacy logs)
-  const visitsWithoutSession = logs.filter(
-    (log) => log.type === "visit" && !log.sessionId
-  ).length;
-  
-  return uniqueSessions.size + visitsWithoutSession;
+  for (let h = 0; h < 24; h++) {
+    heatmapBuckets[h] = { visits: 0, forms: 0, payments: 0, formSessions: new Set() };
+  }
+
+  for (const event of heatmapEvents) {
+    const hourOfDay = event.timestamp.getHours();
+    
+    if (event.type === "visit") heatmapBuckets[hourOfDay].visits++;
+    if (event.type === "form") {
+      if (event.sessionId) {
+        heatmapBuckets[hourOfDay].formSessions.add(event.sessionId);
+      } else {
+        heatmapBuckets[hourOfDay].forms++;
+      }
+    }
+    if (event.type === "payment") heatmapBuckets[hourOfDay].payments++;
+  }
+
+  const heatmapPoints: HeatmapPoint[] = heatmapBuckets.map((bucket, hour) => ({
+    hour,
+    visits: bucket.visits,
+    forms: bucket.formSessions.size + bucket.forms,
+    payments: bucket.payments,
+    revenue: Math.round(bucket.payments * PRICE_PER_PAYMENT * 100) / 100,
+  }));
+
+  // Build marketing data
+  const sessionUTMMap: Map<string, { source: string; campaign: string }> = new Map();
+  const sessionMetrics: Map<string, { hasVisit: boolean; hasForm: boolean; hasPayment: boolean }> = new Map();
+
+  for (const event of marketingEvents) {
+    if (!event.sessionId) continue;
+
+    if (!sessionUTMMap.has(event.sessionId)) {
+      const source = event.utmSource || "direct";
+      const campaign = event.utmCampaign || "none";
+      sessionUTMMap.set(event.sessionId, { source, campaign });
+    }
+
+    if (!sessionMetrics.has(event.sessionId)) {
+      sessionMetrics.set(event.sessionId, { hasVisit: false, hasForm: false, hasPayment: false });
+    }
+    const metrics = sessionMetrics.get(event.sessionId)!;
+
+    if (event.type === "visit") metrics.hasVisit = true;
+    if (event.type === "form") metrics.hasForm = true;
+    if (event.type === "payment") metrics.hasPayment = true;
+  }
+
+  const sourceCampaignAgg: Map<string, MarketingSourceCampaign> = new Map();
+
+  sessionUTMMap.forEach((utm, sessionId) => {
+    const key = `${utm.source}::${utm.campaign}`;
+    const metrics = sessionMetrics.get(sessionId);
+    
+    if (!metrics) return;
+
+    if (!sourceCampaignAgg.has(key)) {
+      sourceCampaignAgg.set(key, {
+        source: utm.source,
+        campaign: utm.campaign,
+        visits: 0,
+        forms: 0,
+        payments: 0,
+        revenue: 0,
+        conversionRate: 0,
+      });
+    }
+
+    const agg = sourceCampaignAgg.get(key)!;
+    if (metrics.hasVisit) agg.visits++;
+    if (metrics.hasForm) agg.forms++;
+    if (metrics.hasPayment) {
+      agg.payments++;
+      agg.revenue = Math.round((agg.payments * PRICE_PER_PAYMENT) * 100) / 100;
+    }
+  });
+
+  const marketingBySourceCampaign: MarketingSourceCampaign[] = Array.from(sourceCampaignAgg.values())
+    .map((agg) => ({
+      ...agg,
+      conversionRate: agg.visits > 0 
+        ? Math.round((agg.payments / agg.visits) * 10000) / 100 
+        : 0,
+    }))
+    .sort((a, b) => b.revenue - a.revenue || b.payments - a.payments);
+
+  // Transform latest events to LogEntry format
+  const latestLogs: LogEntry[] = latestEvents.map((event) => ({
+    id: event.id.toString(),
+    timestamp: event.timestamp.toISOString(),
+    type: event.type,
+    message: event.message || "",
+    payload: event.metadata as Record<string, unknown> | undefined,
+    sessionId: event.sessionId || undefined,
+    userAgent: event.userAgent || undefined,
+    ipAddress: event.ip || undefined,
+    utm: (event.utmSource || event.utmMedium || event.utmCampaign || event.utmContent || event.utmTerm)
+      ? {
+          source: event.utmSource || undefined,
+          medium: event.utmMedium || undefined,
+          campaign: event.utmCampaign || undefined,
+          content: event.utmContent || undefined,
+          term: event.utmTerm || undefined,
+        }
+      : undefined,
+  }));
+
+  return {
+    kpis,
+    timeseries: { points },
+    heatmap: { byHourOfDay: heatmapPoints },
+    marketing: { bySourceCampaign: marketingBySourceCampaign },
+    latestLogs: latestLogs.map((log) => maskEmailsInObject(log) as LogEntry),
+  };
 }
 
 /**
  * GET /api/metrics
- * Returns computed KPIs, timeseries data, and latest logs.
- * 
- * Important:
- * - "intent" type is NOT counted in KPIs (it's just interest, not a conversion)
- * - Only "form" type counts for form submissions
- * - Forms are deduplicated per session
+ * Returns computed KPIs, timeseries data, heatmap, marketing data, and latest logs.
+ * Uses caching with 30-second TTL.
  */
 export async function GET() {
   try {
-    const logs = await readLogs();
-    
-    // Compute global KPIs
-    // Note: "intent" is intentionally excluded from all metrics
-    const totalVisits = logs.filter((log) => log.type === "visit").length;
-    const uniqueVisitors = countUniqueVisitors(logs);
-    const totalForms = countUniqueFormsPerSession(logs); // Deduplicated forms
-    const totalCheckouts = logs.filter((log) => log.type === "checkout").length;
-    const totalPayments = logs.filter((log) => log.type === "payment").length;
-    
-    // Conversion rate based on unique visitors for more accurate metrics
-    const conversionRate = uniqueVisitors > 0 
-      ? Math.round((totalPayments / uniqueVisitors) * 10000) / 100 
-      : 0;
-    
-    const revenueTotal = Math.round(totalPayments * 4.9 * 100) / 100;
-
-    const kpis: KPIs = {
-      totalVisits,
-      uniqueVisitors,
-      totalForms,
-      totalCheckouts,
-      totalPayments,
-      conversionRate,
-      revenueTotal,
-    };
-
-    // Compute time-based metrics (last 24 hours)
-    const hourSlots = generateHourSlots(24);
-    const now = new Date();
-    const twentyFourHoursAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
-
-    // Filter logs from last 24 hours
-    const recentLogs = logs.filter((log) => {
-      const logDate = new Date(log.timestamp);
-      return logDate >= twentyFourHoursAgo;
+    // Check cache
+    const cached = await prisma.metricsCache.findUnique({
+      where: { key: "metrics_response" },
     });
 
-    // Group by hour - track unique form sessions per hour for accurate counts
-    const hourlyData: Record<string, { 
-      visits: number; 
-      forms: number; 
-      checkouts: number; 
-      payments: number;
-      formSessions: Set<string>;
-    }> = {};
-    
-    for (const slot of hourSlots) {
-      hourlyData[slot] = { 
-        visits: 0, 
-        forms: 0, 
-        checkouts: 0, 
-        payments: 0,
-        formSessions: new Set()
-      };
-    }
-
-    for (const log of recentLogs) {
-      const logHour = truncateToHour(new Date(log.timestamp));
+    if (cached) {
+      const cachedData = cached.value as unknown as { response: MetricsResponse; timestamp: number };
+      const age = Date.now() - cachedData.timestamp;
       
-      if (hourlyData[logHour]) {
-        // Count visits
-        if (log.type === "visit") {
-          hourlyData[logHour].visits++;
-        }
-        
-        // Count forms (deduplicated per session within each hour)
-        if (log.type === "form") {
-          if (log.sessionId) {
-            hourlyData[logHour].formSessions.add(log.sessionId);
-          } else {
-            // Legacy form without session - count it
-            hourlyData[logHour].forms++;
-          }
-        }
-        
-        // Count checkouts
-        if (log.type === "checkout") {
-          hourlyData[logHour].checkouts++;
-        }
-        
-        // Count payments
-        if (log.type === "payment") {
-          hourlyData[logHour].payments++;
-        }
-        
-        // Note: "intent" is NOT counted in timeseries (not a funnel stage)
+      if (age < CACHE_TTL_MS) {
+        // Return cached response
+        return NextResponse.json(cachedData.response);
       }
     }
 
-    // Build timeseries points
-    const points: TimeseriesPoint[] = hourSlots.map((hour) => ({
-      hour,
-      visits: hourlyData[hour].visits,
-      // Forms = unique sessions + legacy forms without session
-      forms: hourlyData[hour].formSessions.size + hourlyData[hour].forms,
-      checkouts: hourlyData[hour].checkouts,
-      payments: hourlyData[hour].payments,
-      revenue: Math.round(hourlyData[hour].payments * 4.9 * 100) / 100,
-    }));
+    // Calculate fresh metrics
+    const response = await calculateMetrics();
 
-    // ============================================
-    // HEATMAP: Aggregate by HOUR OF DAY (0-23)
-    // This is DIFFERENT from timeseries which shows specific timestamps.
-    // Heatmap shows: "How many visits happened at 14h across ALL 7 days?"
-    // ============================================
-    
-    // Step 1: Initialize buckets for each hour of day (0-23)
-    // Each bucket will accumulate data from ALL logs that happened at that hour
-    const heatmapBuckets: Array<{
-      visits: number;
-      forms: number;
-      payments: number;
-      formSessions: Set<string>;
-    }> = [];
-    
-    for (let h = 0; h < 24; h++) {
-      heatmapBuckets[h] = { 
-        visits: 0, 
-        forms: 0, 
-        payments: 0, 
-        formSessions: new Set() 
-      };
-    }
-
-    // Step 2: Filter logs from last 7 days
-    const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-    const heatmapLogs = logs.filter((log) => new Date(log.timestamp) >= sevenDaysAgo);
-
-    // Step 3: Aggregate each log into its hour-of-day bucket
-    for (const log of heatmapLogs) {
-      const logDate = new Date(log.timestamp);
-      // Extract ONLY the hour (0-23), ignoring the date
-      const hourOfDay = logDate.getHours();
-
-      if (log.type === "visit") {
-        heatmapBuckets[hourOfDay].visits++;
-      }
-      if (log.type === "form") {
-        if (log.sessionId) {
-          heatmapBuckets[hourOfDay].formSessions.add(log.sessionId);
-        } else {
-          heatmapBuckets[hourOfDay].forms++;
-        }
-      }
-      if (log.type === "payment") {
-        heatmapBuckets[hourOfDay].payments++;
-      }
-    }
-
-    // Step 4: Build the final heatmap array (always 24 elements, one per hour)
-    const heatmapPoints: HeatmapPoint[] = [];
-    for (let hour = 0; hour < 24; hour++) {
-      const bucket = heatmapBuckets[hour];
-      heatmapPoints.push({
-        hour, // 0, 1, 2, ... 23
-        visits: bucket.visits,
-        forms: bucket.formSessions.size + bucket.forms,
-        payments: bucket.payments,
-        revenue: Math.round(bucket.payments * 4.9 * 100) / 100,
-      });
-    }
-
-    // ============================================
-    // MARKETING: Aggregate by UTM source/campaign
-    // ============================================
-    // Last 30 days for marketing analytics
-    const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
-    const marketingLogs = logs.filter((log) => new Date(log.timestamp) >= thirtyDaysAgo);
-
-    // Group sessions by their UTM
-    const sessionUTMMap: Map<string, { source: string; campaign: string }> = new Map();
-    const sessionMetrics: Map<string, { hasVisit: boolean; hasForm: boolean; hasPayment: boolean }> = new Map();
-
-    for (const log of marketingLogs) {
-      if (!log.sessionId) continue;
-
-      // Track UTM for session (first occurrence wins - first touch)
-      if (!sessionUTMMap.has(log.sessionId)) {
-        const source = log.utm?.source || "direct";
-        const campaign = log.utm?.campaign || "none";
-        sessionUTMMap.set(log.sessionId, { source, campaign });
-      }
-
-      // Track session metrics
-      if (!sessionMetrics.has(log.sessionId)) {
-        sessionMetrics.set(log.sessionId, { hasVisit: false, hasForm: false, hasPayment: false });
-      }
-      const metrics = sessionMetrics.get(log.sessionId)!;
-
-      if (log.type === "visit") metrics.hasVisit = true;
-      if (log.type === "form") metrics.hasForm = true;
-      if (log.type === "payment") metrics.hasPayment = true;
-    }
-
-    // Aggregate by source/campaign
-    const sourceCampaignAgg: Map<string, MarketingSourceCampaign> = new Map();
-
-    sessionUTMMap.forEach((utm, sessionId) => {
-      const key = `${utm.source}::${utm.campaign}`;
-      const metrics = sessionMetrics.get(sessionId);
-      
-      if (!metrics) return; // Use return in forEach instead of continue
-
-      if (!sourceCampaignAgg.has(key)) {
-        sourceCampaignAgg.set(key, {
-          source: utm.source,
-          campaign: utm.campaign,
-          visits: 0,
-          forms: 0,
-          payments: 0,
-          revenue: 0,
-          conversionRate: 0,
-        });
-      }
-
-      const agg = sourceCampaignAgg.get(key)!;
-      if (metrics.hasVisit) agg.visits++;
-      if (metrics.hasForm) agg.forms++;
-      if (metrics.hasPayment) {
-        agg.payments++;
-        agg.revenue = Math.round((agg.payments * 4.9) * 100) / 100;
-      }
+    // Update cache
+    await prisma.metricsCache.upsert({
+      where: { key: "metrics_response" },
+      update: {
+        value: { response, timestamp: Date.now() } as unknown as object,
+        updatedAt: new Date(),
+      },
+      create: {
+        key: "metrics_response",
+        value: { response, timestamp: Date.now() } as unknown as object,
+        updatedAt: new Date(),
+      },
     });
-
-    // Calculate conversion rates and sort by revenue desc
-    const marketingBySourceCampaign: MarketingSourceCampaign[] = Array.from(sourceCampaignAgg.values())
-      .map((agg) => ({
-        ...agg,
-        conversionRate: agg.visits > 0 
-          ? Math.round((agg.payments / agg.visits) * 10000) / 100 
-          : 0,
-      }))
-      .sort((a, b) => b.revenue - a.revenue || b.payments - a.payments);
-
-    // Get latest 50 logs (most recent first)
-    // Include all types (including intent) for the live feed
-    const latestLogs = [...logs].reverse().slice(0, 50);
-
-    const response: MetricsResponse = {
-      kpis,
-      timeseries: { points },
-      heatmap: {
-        byHourOfDay: heatmapPoints,
-      },
-      marketing: {
-        bySourceCampaign: marketingBySourceCampaign,
-      },
-      latestLogs,
-    };
 
     return NextResponse.json(response);
   } catch (error) {

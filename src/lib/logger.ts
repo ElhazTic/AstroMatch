@@ -1,15 +1,7 @@
-import { promises as fs } from "fs";
-import path from "path";
+import { prisma } from "./prisma";
 import { logEmitter } from "./logEmitter";
 import { sendTrafficSpikeAlert } from "./notifyTelegram";
 import { UTMData } from "./session";
-import { markAnalysisAsStale, loadIAAnalysis } from "./iaAnalysis";
-
-// On Vercel, only /tmp is writable. Use /tmp for production, data/ for local dev.
-const isVercel = process.env.VERCEL === "1";
-const LOGS_FILE_PATH = isVercel 
-  ? "/tmp/logs.json"
-  : path.join(process.cwd(), "data", "logs.json");
 
 // Traffic spike detection configuration
 const TRAFFIC_SPIKE_INTERVAL_SECONDS = 20;
@@ -32,11 +24,9 @@ export interface LogEntry {
   type: "visit" | "form" | "intent" | "checkout" | "payment" | "pdf" | "error" | string;
   message: string;
   payload?: Record<string, unknown>;
-  // Session tracking fields
   sessionId?: string;
   userAgent?: string;
   ipAddress?: string;
-  // UTM tracking fields
   utm?: UTMData;
 }
 
@@ -51,44 +41,31 @@ export interface SessionContext {
 }
 
 /**
- * Ensures the data directory and logs.json file exist.
- * On Vercel, /tmp is used and may fail gracefully.
- */
-async function ensureLogsFile(): Promise<void> {
-  try {
-    const dataDir = path.dirname(LOGS_FILE_PATH);
-    
-    try {
-      await fs.access(dataDir);
-    } catch {
-      await fs.mkdir(dataDir, { recursive: true });
-    }
-
-    try {
-      await fs.access(LOGS_FILE_PATH);
-    } catch {
-      await fs.writeFile(LOGS_FILE_PATH, JSON.stringify([], null, 2), "utf-8");
-    }
-  } catch {
-    // On Vercel or read-only filesystem, this may fail - that's OK
-    console.log("[LOG] Could not ensure logs file (read-only filesystem?)");
-  }
-}
-
-/**
- * Generates a unique ID for each log entry.
+ * Generates a unique ID for each log entry (compatible with old format)
  */
 function generateId(): string {
   return `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
 }
 
 /**
- * Mark the IA analysis as stale and log the action.
- * Called when metric-affecting events are logged.
+ * Mark the IA analysis as stale in the database cache
  */
 async function markIAAnalysisAsStale(): Promise<void> {
   try {
-    await markAnalysisAsStale();
+    await prisma.metricsCache.upsert({
+      where: { key: "ia_analysis" },
+      update: {
+        value: {
+          isStale: true,
+        },
+        updatedAt: new Date(),
+      },
+      create: {
+        key: "ia_analysis",
+        value: { isStale: true },
+        updatedAt: new Date(),
+      },
+    });
     console.log("[IA] Analysis marked as stale");
   } catch (error) {
     console.log("[IA] Could not mark analysis as stale:", error instanceof Error ? error.message : "Unknown error");
@@ -97,26 +74,25 @@ async function markIAAnalysisAsStale(): Promise<void> {
 
 /**
  * Trigger IA recompute if cooldown has passed.
- * This is called automatically when metrics change.
  */
 async function triggerIARecomputeIfNeeded(): Promise<void> {
   const now = Date.now();
   
-  // Check cooldown
   if (now - lastIARecomputeTime < IA_RECOMPUTE_COOLDOWN_MS) {
     return;
   }
 
   try {
-    // Read current analysis to check if it's stale
-    const analysis = await loadIAAnalysis();
+    const cached = await prisma.metricsCache.findUnique({
+      where: { key: "ia_analysis" },
+    });
     
-    if (analysis?.isStale) {
-      // Trigger auto recompute via internal fetch
+    const value = cached?.value as { isStale?: boolean } | null;
+    
+    if (value?.isStale) {
       console.log("[IA] Triggering auto recompute...");
       lastIARecomputeTime = now;
       
-      // Use dynamic import to avoid circular dependencies
       const baseUrl = process.env.VERCEL_URL 
         ? `https://${process.env.VERCEL_URL}` 
         : process.env.NEXTAUTH_URL || "http://localhost:3000";
@@ -128,87 +104,115 @@ async function triggerIARecomputeIfNeeded(): Promise<void> {
       });
     }
   } catch {
-    // Silently ignore - file might not exist
+    // Silently ignore
   }
 }
 
 /**
  * Checks for traffic spikes and sends alerts if threshold is exceeded.
  */
-async function checkTrafficSpike(logs: LogEntry[], currentTimestamp: Date): Promise<void> {
+async function checkTrafficSpike(currentTimestamp: Date): Promise<void> {
   const now = currentTimestamp.getTime();
   
-  // Check cooldown
   if (now - lastTrafficAlertTime < TRAFFIC_ALERT_COOLDOWN_MS) {
     return;
   }
 
-  // Count visits in the last X seconds
-  const intervalStart = now - (TRAFFIC_SPIKE_INTERVAL_SECONDS * 1000);
-  const recentVisits = logs.filter((log) => {
-    if (log.type !== "visit") return false;
-    const logTime = new Date(log.timestamp).getTime();
-    return logTime >= intervalStart;
-  });
-
-  if (recentVisits.length >= TRAFFIC_SPIKE_THRESHOLD) {
-    // Count visitors in last 5 minutes for additional context
-    const fiveMinAgo = now - (5 * 60 * 1000);
-    const visitsLast5min = logs.filter((log) => {
-      if (log.type !== "visit") return false;
-      const logTime = new Date(log.timestamp).getTime();
-      return logTime >= fiveMinAgo;
-    }).length;
-
-    // Send alert
-    console.log(`[TRAFFIC SPIKE] ${recentVisits.length} visitors in ${TRAFFIC_SPIKE_INTERVAL_SECONDS}s!`);
-    await sendTrafficSpikeAlert(
-      recentVisits.length,
-      TRAFFIC_SPIKE_INTERVAL_SECONDS,
-      visitsLast5min
-    );
+  try {
+    const intervalStart = new Date(now - (TRAFFIC_SPIKE_INTERVAL_SECONDS * 1000));
     
-    lastTrafficAlertTime = now;
+    const recentVisits = await prisma.event.count({
+      where: {
+        type: "visit",
+        timestamp: { gte: intervalStart },
+      },
+    });
+
+    if (recentVisits >= TRAFFIC_SPIKE_THRESHOLD) {
+      const fiveMinAgo = new Date(now - (5 * 60 * 1000));
+      const visitsLast5min = await prisma.event.count({
+        where: {
+          type: "visit",
+          timestamp: { gte: fiveMinAgo },
+        },
+      });
+
+      console.log(`[TRAFFIC SPIKE] ${recentVisits} visitors in ${TRAFFIC_SPIKE_INTERVAL_SECONDS}s!`);
+      await sendTrafficSpikeAlert(
+        recentVisits,
+        TRAFFIC_SPIKE_INTERVAL_SECONDS,
+        visitsLast5min
+      );
+      
+      lastTrafficAlertTime = now;
+    }
+  } catch (err) {
+    console.error("[TRAFFIC SPIKE] Error checking traffic spike:", err);
   }
 }
 
 /**
  * Checks if a form log already exists for the given session ID.
- * Used to prevent duplicate form submissions.
- * 
- * @param sessionId - The session ID to check
- * @returns True if a form already exists for this session
  */
 export async function hasFormForSession(sessionId: string): Promise<boolean> {
-  const logs = await readLogs();
-  return logs.some((log) => log.type === "form" && log.sessionId === sessionId);
+  const count = await prisma.event.count({
+    where: {
+      type: "form",
+      sessionId: sessionId,
+    },
+  });
+  return count > 0;
 }
 
 /**
- * Appends a new log entry to the logs file and notifies SSE clients.
+ * Updates or creates a user session in the database
+ */
+async function upsertSession(sessionContext: SessionContext): Promise<void> {
+  try {
+    await prisma.userSession.upsert({
+      where: { sessionId: sessionContext.sessionId },
+      update: {
+        lastSeen: new Date(),
+        userAgent: sessionContext.userAgent || undefined,
+        ip: sessionContext.ipAddress || undefined,
+        utmSource: sessionContext.utm?.source || undefined,
+        utmCampaign: sessionContext.utm?.campaign || undefined,
+      },
+      create: {
+        sessionId: sessionContext.sessionId,
+        createdAt: new Date(),
+        lastSeen: new Date(),
+        userAgent: sessionContext.userAgent || undefined,
+        ip: sessionContext.ipAddress || undefined,
+        utmSource: sessionContext.utm?.source || undefined,
+        utmCampaign: sessionContext.utm?.campaign || undefined,
+      },
+    });
+  } catch (err) {
+    console.error("[SESSION] Failed to upsert session:", err);
+  }
+}
+
+/**
+ * Appends a new log entry to the database and notifies SSE clients.
  * Also checks for traffic spikes on "visit" events.
- * 
- * @param event - The log event data
- * @param sessionContext - Optional session context (sessionId, userAgent, ipAddress, utm)
  */
 export async function appendLog(
   event: Omit<LogEntry, "id" | "timestamp">,
   sessionContext?: SessionContext
 ): Promise<LogEntry> {
-  await ensureLogsFile();
-
   const currentTimestamp = new Date();
+  const logId = generateId();
+  
   const logEntry: LogEntry = {
-    id: generateId(),
+    id: logId,
     timestamp: currentTimestamp.toISOString(),
     type: event.type,
     message: event.message,
     ...(event.payload && { payload: event.payload }),
-    // Include session context if provided
     ...(sessionContext?.sessionId && { sessionId: sessionContext.sessionId }),
     ...(sessionContext?.userAgent && { userAgent: sessionContext.userAgent }),
     ...(sessionContext?.ipAddress && { ipAddress: sessionContext.ipAddress }),
-    // Include UTM data if provided
     ...(sessionContext?.utm && { utm: sessionContext.utm }),
   };
 
@@ -218,48 +222,48 @@ export async function appendLog(
     : "";
   console.log(`[LOG] ${logEntry.type}${sessionInfo}: ${logEntry.message}`);
 
-  // Always emit event for SSE clients (works even if file write fails)
+  // Always emit event for SSE clients (immediate feedback)
   logEmitter.emit("log", logEntry);
 
-  // Try to persist to file (may fail on read-only filesystem like Vercel)
-  let trimmedLogs: LogEntry[] = [logEntry];
+  // Persist to database
   try {
-    let logs: LogEntry[] = [];
-    
-    try {
-      const data = await fs.readFile(LOGS_FILE_PATH, "utf-8");
-      logs = JSON.parse(data);
-      if (!Array.isArray(logs)) logs = [];
-    } catch {
-      // File doesn't exist or is malformed - start fresh
-      logs = [];
+    await prisma.event.create({
+      data: {
+        type: event.type,
+        message: event.message,
+        sessionId: sessionContext?.sessionId,
+        timestamp: currentTimestamp,
+        ip: sessionContext?.ipAddress,
+        userAgent: sessionContext?.userAgent,
+        utmSource: sessionContext?.utm?.source,
+        utmMedium: sessionContext?.utm?.medium,
+        utmCampaign: sessionContext?.utm?.campaign,
+        utmContent: sessionContext?.utm?.content,
+        utmTerm: sessionContext?.utm?.term,
+        metadata: event.payload ? (event.payload as object) : undefined,
+      },
+    });
+
+    // Update session if context provided
+    if (sessionContext) {
+      upsertSession(sessionContext).catch((err) => {
+        console.error("[SESSION] Upsert failed:", err);
+      });
     }
-    
-    logs.push(logEntry);
-    
-    // Keep only last 1000 logs to prevent file from growing too large
-    trimmedLogs = logs.slice(-1000);
-    
-    await fs.writeFile(LOGS_FILE_PATH, JSON.stringify(trimmedLogs, null, 2), "utf-8");
-  } catch (writeError) {
-    // On Vercel or read-only filesystem, file write will fail - that's OK
-    // The log was still emitted via SSE and logged to console
-    console.log("[LOG] Could not persist log to file (read-only filesystem?)");
+  } catch (dbError) {
+    console.error("[LOG] Could not persist log to database:", dbError);
   }
 
   // Check for traffic spike on visit events
   if (event.type === "visit") {
-    // Run asynchronously to not block the response
-    checkTrafficSpike(trimmedLogs, currentTimestamp).catch((err) => {
+    checkTrafficSpike(currentTimestamp).catch((err) => {
       console.error("[TRAFFIC SPIKE] Error checking traffic spike:", err);
     });
   }
 
   // Mark IA analysis as stale for metric-affecting events
   if (METRIC_AFFECTING_TYPES.includes(event.type)) {
-    // Run asynchronously to not block the response
     markIAAnalysisAsStale().then(() => {
-      // Check if we should trigger auto recompute
       triggerIARecomputeIfNeeded().catch((err) => {
         console.error("[IA] Error triggering recompute:", err);
       });
@@ -272,51 +276,91 @@ export async function appendLog(
 }
 
 /**
- * Reads all logs from the logs file.
- * Returns empty array if file doesn't exist or is malformed.
+ * Reads logs from the database.
+ * Returns the most recent logs (up to limit).
  */
-export async function readLogs(): Promise<LogEntry[]> {
+export async function readLogs(limit: number = 1000): Promise<LogEntry[]> {
   try {
-    // Try to ensure the file exists first
-    await ensureLogsFile();
-  } catch {
-    // If we can't create the file (e.g., read-only filesystem on Vercel),
-    // just try to read it anyway
-    console.log("[LOG] Could not ensure logs file exists, attempting read anyway");
-  }
+    const events = await prisma.event.findMany({
+      orderBy: { timestamp: "desc" },
+      take: limit,
+    });
 
-  let raw = "";
-  try {
-    raw = await fs.readFile(LOGS_FILE_PATH, "utf-8");
-  } catch {
-    // File doesn't exist or can't be read
-    console.log("[LOG] Logs file not found or unreadable, returning empty array");
-    return [];
-  }
-
-  // Handle empty file
-  if (!raw || raw.trim() === "") {
-    return [];
-  }
-
-  try {
-    const parsed = JSON.parse(raw);
-    // Ensure we return an array
-    if (!Array.isArray(parsed)) {
-      console.warn("[LOG] Logs file did not contain an array, returning empty array");
-      return [];
-    }
-    return parsed;
-  } catch (parseError) {
-    console.error("[LOG] Failed to parse logs JSON:", parseError);
+    return events.map((event) => ({
+      id: event.id.toString(),
+      timestamp: event.timestamp.toISOString(),
+      type: event.type as LogEntry["type"],
+      message: event.message || "",
+      payload: event.metadata as Record<string, unknown> | undefined,
+      sessionId: event.sessionId || undefined,
+      userAgent: event.userAgent || undefined,
+      ipAddress: event.ip || undefined,
+      utm: (event.utmSource || event.utmMedium || event.utmCampaign || event.utmContent || event.utmTerm) 
+        ? {
+            source: event.utmSource || undefined,
+            medium: event.utmMedium || undefined,
+            campaign: event.utmCampaign || undefined,
+            content: event.utmContent || undefined,
+            term: event.utmTerm || undefined,
+          }
+        : undefined,
+    })).reverse(); // Reverse to get chronological order (oldest first)
+  } catch (error) {
+    console.error("[LOG] Failed to read logs from database:", error);
     return [];
   }
 }
 
 /**
+ * Reads the latest N events (most recent first)
+ */
+export async function readLatestEvents(limit: number = 200): Promise<LogEntry[]> {
+  try {
+    const events = await prisma.event.findMany({
+      orderBy: { timestamp: "desc" },
+      take: limit,
+    });
+
+    return events.map((event) => ({
+      id: event.id.toString(),
+      timestamp: event.timestamp.toISOString(),
+      type: event.type as LogEntry["type"],
+      message: event.message || "",
+      payload: event.metadata as Record<string, unknown> | undefined,
+      sessionId: event.sessionId || undefined,
+      userAgent: event.userAgent || undefined,
+      ipAddress: event.ip || undefined,
+      utm: (event.utmSource || event.utmMedium || event.utmCampaign || event.utmContent || event.utmTerm) 
+        ? {
+            source: event.utmSource || undefined,
+            medium: event.utmMedium || undefined,
+            campaign: event.utmCampaign || undefined,
+            content: event.utmContent || undefined,
+            term: event.utmTerm || undefined,
+          }
+        : undefined,
+    }));
+  } catch (error) {
+    console.error("[LOG] Failed to read latest events from database:", error);
+    return [];
+  }
+}
+
+/**
+ * Resets all logs by deleting all events from the database.
+ */
+export async function resetLogs(): Promise<void> {
+  try {
+    await prisma.event.deleteMany({});
+    console.log("[LOG] All logs have been reset");
+  } catch (error) {
+    console.error("[LOG] Failed to reset logs:", error);
+    throw error;
+  }
+}
+
+/**
  * Helper function to log from frontend via API.
- * Call this in server-side code or use the /api/log endpoint from client.
- * 
  * @deprecated Use appendLog with sessionContext instead for new implementations
  */
 export async function logEvent(

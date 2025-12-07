@@ -3,17 +3,26 @@ import { constructWebhookEvent } from "@/lib/stripe";
 import { generatePremiumPdf } from "@/lib/pdf";
 import { sendReportEmail } from "@/lib/email";
 import { generateLongReport } from "@/lib/generateLongReport";
-import { appendLog, readLogs, SessionContext } from "@/lib/logger";
+import { appendLog, SessionContext } from "@/lib/logger";
+import { prisma } from "@/lib/prisma";
 import { UTMData } from "@/lib/session";
 import { 
   sendPaymentAlert, 
   sendPdfGeneratedAlert, 
   sendErrorAlert,
-  getTodayMidnight 
 } from "@/lib/notifyTelegram";
 import Stripe from "stripe";
 
 const PRICE_PER_REPORT = 4.90;
+const PRICE_IN_CENTS = 490;
+
+/**
+ * Get today's midnight for revenue calculation
+ */
+function getTodayMidnight(): Date {
+  const now = new Date();
+  return new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
+}
 
 export async function POST(request: NextRequest) {
   try {
@@ -90,6 +99,25 @@ export async function POST(request: NextRequest) {
 
       console.log(`Processing premium payment for ${email} - ${personA} & ${personB}${utm?.source ? ` (UTM: ${utm.source})` : ''}`);
 
+      // Insert payment into database
+      try {
+        await prisma.payment.create({
+          data: {
+            stripeSessionId: session.id,
+            amount: PRICE_IN_CENTS,
+            currency: "eur",
+            email: email,
+            personA: personA,
+            personB: personB,
+            sessionId: sessionId || null,
+          },
+        });
+        console.log("[PAYMENT] Payment inserted into database");
+      } catch (dbError) {
+        console.error("[PAYMENT] Failed to insert payment:", dbError);
+        // Continue even if insert fails
+      }
+
       // Log payment confirmed with UTM tracking
       await appendLog(
         {
@@ -100,15 +128,15 @@ export async function POST(request: NextRequest) {
         sessionContext
       );
 
-      // Calculate today's revenue for the alert
+      // Calculate today's revenue from database
       let revenueToday = PRICE_PER_REPORT;
       try {
-        const logs = await readLogs();
         const todayMidnight = getTodayMidnight();
-        const paymentsToday = logs.filter((log) => {
-          if (log.type !== "payment") return false;
-          return new Date(log.timestamp) >= todayMidnight;
-        }).length;
+        const paymentsToday = await prisma.payment.count({
+          where: {
+            createdAt: { gte: todayMidnight },
+          },
+        });
         revenueToday = paymentsToday * PRICE_PER_REPORT;
       } catch (err) {
         console.error("Error calculating today's revenue:", err);

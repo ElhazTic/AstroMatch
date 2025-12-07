@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { appendLog, readLogs, LogEntry, hasFormForSession } from "@/lib/logger";
+import { appendLog, readLatestEvents, hasFormForSession, LogEntry } from "@/lib/logger";
 import { sendFormAlert } from "@/lib/notifyTelegram";
 import { getSessionContext, setSessionCookie, setUTMCookie } from "@/lib/session";
 import { maskEmailsInObject } from "@/lib/maskEmail";
@@ -77,8 +77,6 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    // Note: "intent" type is logged but does NOT trigger Telegram
-
     // Create response with session cookie
     const response = NextResponse.json(
       { ...logEntry, sessionId: sessionContext.sessionId },
@@ -108,7 +106,7 @@ export async function POST(request: NextRequest) {
  */
 export async function GET() {
   try {
-    const logs: LogEntry[] = await readLogs();
+    const logs: LogEntry[] = await readLatestEvents(1000);
     
     // Masquer les emails dans les logs pour la conformité RGPD
     const maskedLogs = logs.map((log) => maskEmailsInObject(log));

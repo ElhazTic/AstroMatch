@@ -9,13 +9,16 @@ Analyse de compatibilité amoureuse par IA, astrologie et psychologie relationne
 - **Rapport PDF complet** : Forces, faiblesses, conseils personnalisés
 - **Paiement Stripe** : Checkout sécurisé à 4,90€
 - **Email automatique** : Rapport PDF envoyé par email après paiement
+- **Dashboard Admin** : Suivi en temps réel du trafic et des conversions
+- **Analyse IA** : Insights automatiques sur les performances
 
 ## 📦 Stack technique
 
 - **Framework** : Next.js 14 (App Router)
 - **Langage** : TypeScript
+- **Database** : PostgreSQL + Prisma 7
 - **Styles** : Tailwind CSS
-- **IA** : OpenAI GPT-4.1-mini
+- **IA** : OpenAI GPT-4o-mini
 - **Paiement** : Stripe Checkout
 - **PDF** : pdf-lib
 - **Email** : Resend
@@ -35,6 +38,9 @@ npm install
 
 3. Créez un fichier `.env.local` à la racine avec ces variables :
 ```env
+# PostgreSQL Database
+DATABASE_URL="postgresql://USER:PASSWORD@HOST:5432/DATABASE"
+
 # OpenAI
 OPENAI_API_KEY=sk-...
 
@@ -47,14 +53,50 @@ STRIPE_PRICE_ID=price_...
 # Resend (Email)
 RESEND_API_KEY=re_...
 EMAIL_FROM="AstroMatch <no-reply@votre-domaine.com>"
+
+# Telegram Bot (optionnel)
+TELEGRAM_BOT_TOKEN=...
+TELEGRAM_CHAT_ID=...
+
+# Cron Secret (optionnel)
+CRON_SECRET=your-random-secret
 ```
 
-4. Lancez le serveur de développement :
+4. Appliquez les migrations Prisma :
+```bash
+npx prisma migrate dev --name init
+```
+
+5. Lancez le serveur de développement :
 ```bash
 npm run dev
 ```
 
-5. Ouvrez [http://localhost:3000](http://localhost:3000)
+6. Ouvrez [http://localhost:3000](http://localhost:3000)
+
+## 🗄️ Base de données PostgreSQL
+
+### Tables Prisma
+
+Le projet utilise 4 tables principales :
+
+- **Event** : Tous les événements de tracking (visites, formulaires, checkouts, paiements)
+- **Payment** : Enregistrement des paiements Stripe
+- **MetricsCache** : Cache des métriques calculées (TTL 30s)
+- **UserSession** : Sessions utilisateur pour le tracking
+
+### Migrations
+
+```bash
+# Créer une nouvelle migration
+npx prisma migrate dev --name nom_migration
+
+# Appliquer les migrations en production
+npx prisma migrate deploy
+
+# Visualiser la base de données
+npx prisma studio
+```
 
 ## 🔧 Configuration Stripe
 
@@ -91,7 +133,8 @@ stripe listen --forward-to localhost:3000/api/stripe-webhook
 
 1. Connectez votre repository à Vercel
 2. Ajoutez toutes les variables d'environnement dans les settings
-3. Déployez !
+3. **Important** : Configurez `DATABASE_URL` avec votre connexion PostgreSQL
+4. Déployez !
 
 **Important** : N'oubliez pas de mettre à jour l'URL du webhook Stripe avec votre domaine de production.
 
@@ -100,22 +143,41 @@ stripe listen --forward-to localhost:3000/api/stripe-webhook
 ```
 src/
 ├── app/
+│   ├── admin/
+│   │   ├── dashboard/        # Dashboard admin temps réel
+│   │   ├── logs/             # Journal des événements
+│   │   └── sessions/         # Détails sessions utilisateur
 │   ├── api/
-│   │   ├── analyze/          # API analyse IA
+│   │   ├── ai/performance/   # Analyse IA des performances
+│   │   ├── analyze/          # API analyse compatibilité
 │   │   ├── create-checkout/  # API création session Stripe
+│   │   ├── events/           # API liste des événements
+│   │   ├── log/              # API logging
+│   │   ├── log-stream/       # SSE temps réel
+│   │   ├── metrics/          # API métriques (avec cache)
+│   │   ├── performance/      # API analyse IA
 │   │   └── stripe-webhook/   # Webhook Stripe
 │   ├── landing/
 │   │   └── page.tsx          # Landing page marketing
+│   ├── performance/
+│   │   └── page.tsx          # Page analyse IA
 │   ├── globals.css           # Styles globaux
 │   ├── layout.tsx            # Layout principal
 │   └── page.tsx              # Page outil (test)
 ├── components/
-│   └── LoadingDots.tsx       # Composant loader
-└── lib/
-    ├── email.ts              # Service d'envoi email
-    ├── openai.ts             # Client OpenAI
-    ├── pdf.ts                # Génération PDF
-    └── stripe.ts             # Client Stripe
+│   ├── analytics/            # Composants analytics (Heatmap)
+│   ├── dashboard/            # Composants dashboard
+│   └── ...
+├── lib/
+│   ├── prisma.ts             # Client Prisma singleton
+│   ├── logger.ts             # Service logging PostgreSQL
+│   ├── iaAnalysis.ts         # Cache analyse IA
+│   ├── email.ts              # Service d'envoi email
+│   ├── openai.ts             # Client OpenAI
+│   ├── pdf.ts                # Génération PDF
+│   └── stripe.ts             # Client Stripe
+└── prisma/
+    └── schema.prisma         # Schéma base de données
 ```
 
 ## 🎨 Design
@@ -123,6 +185,27 @@ src/
 - **Thème** : Bleu nuit (#050818) + Or (#fcd34d)
 - **Style** : Mystique moderne, élégant
 - **Responsive** : Mobile-first
+
+## 📊 Dashboard Admin
+
+Accessible via `/admin/dashboard` :
+
+- **KPIs temps réel** : Visites, formulaires, paiements, conversion, revenu
+- **Graphiques** : Trafic 24h, revenu cumulé
+- **Heatmap** : Activité par heure (7 jours)
+- **Marketing** : Performance des campagnes UTM
+- **Live Feed** : Flux d'événements en temps réel (SSE)
+
+## 🧠 Analyse IA
+
+Accessible via `/performance` :
+
+- **Résumé automatique** : Analyse globale des performances
+- **Analyse du funnel** : Points de friction détectés
+- **Heures chaudes** : Meilleurs moments pour publier
+- **Insights UTM** : Performance des campagnes
+- **Recommandations** : Actions concrètes à mettre en place
+- **Projections ROI** : Calcul basé sur budget TikTok
 
 ## ⚠️ Avertissement
 
