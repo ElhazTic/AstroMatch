@@ -3,7 +3,7 @@ import { logEmitter } from "./logEmitter";
 import { sendTrafficSpikeAlert } from "./notifyTelegram";
 import { UTMData } from "./session";
 import type { Prisma } from "@prisma/client";
-type DBEvent = Prisma.EventGetPayload<{}>;
+type DBEvent = Prisma.EventGetPayload<true>;
 
 // Traffic spike detection configuration
 const TRAFFIC_SPIKE_INTERVAL_SECONDS = 20;
