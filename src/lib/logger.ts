@@ -267,7 +267,7 @@ export async function readLogs(): Promise<LogEntry[]> {
   let raw = "";
   try {
     raw = await fs.readFile(LOGS_FILE_PATH, "utf-8");
-  } catch (error) {
+  } catch {
     // File doesn't exist or can't be read
     console.log("[LOG] Logs file not found or unreadable, returning empty array");
     return [];
