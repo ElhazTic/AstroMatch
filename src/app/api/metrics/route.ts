@@ -356,7 +356,21 @@ async function calculateMetrics(): Promise<MetricsResponse> {
     .sort((a, b) => b.revenue - a.revenue || b.payments - a.payments);
 
   // Transform latest events to LogEntry format
-  const latestLogs: LogEntry[] = latestEvents.map((event) => ({
+  const latestLogs: LogEntry[] = latestEvents.map((event: {
+    id: number;
+    type: string;
+    message: string | null;
+    timestamp: Date;
+    sessionId: string | null;
+    userAgent: string | null;
+    ip: string | null;
+    utmSource: string | null;
+    utmMedium: string | null;
+    utmCampaign: string | null;
+    utmContent: string | null;
+    utmTerm: string | null;
+    metadata: unknown;
+  }) => ({
     id: event.id.toString(),
     timestamp: event.timestamp.toISOString(),
     type: event.type,
