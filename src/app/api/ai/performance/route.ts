@@ -66,6 +66,8 @@ async function computeMetrics(): Promise<PerformanceMetrics> {
   const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
   const oneDayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
 
+  type SessionRow = { sessionId: string | null };
+
   // Get all counts in parallel
   const [
     totalVisits,
@@ -80,20 +82,32 @@ async function computeMetrics(): Promise<PerformanceMetrics> {
     recentFormSessions,
   ] = await Promise.all([
     prisma.event.count({ where: { type: "visit" } }),
-    prisma.event.findMany({
-      where: { type: "visit", sessionId: { not: null } },
-      select: { sessionId: true },
-    }).then((results) => {
-      const uniqueSessions = new Set(results.map(r => r.sessionId).filter((id): id is string => id !== null));
-      return Array.from(uniqueSessions).map(sessionId => ({ sessionId }));
-    }),
-    prisma.event.findMany({
-      where: { type: "form", sessionId: { not: null } },
-      select: { sessionId: true },
-    }).then((results) => {
-      const uniqueSessions = new Set(results.map(r => r.sessionId).filter((id): id is string => id !== null));
-      return Array.from(uniqueSessions).map(sessionId => ({ sessionId }));
-    }),
+    prisma.event
+      .findMany({
+        where: { type: "visit", sessionId: { not: null } },
+        select: { sessionId: true },
+      })
+      .then((results: SessionRow[]) => {
+        const uniqueSessions = new Set(
+          results
+            .map((r) => r.sessionId)
+            .filter((id): id is string => id !== null)
+        );
+        return Array.from(uniqueSessions).map((sessionId) => ({ sessionId }));
+      }),
+    prisma.event
+      .findMany({
+        where: { type: "form", sessionId: { not: null } },
+        select: { sessionId: true },
+      })
+      .then((results: SessionRow[]) => {
+        const uniqueSessions = new Set(
+          results
+            .map((r) => r.sessionId)
+            .filter((id): id is string => id !== null)
+        );
+        return Array.from(uniqueSessions).map((sessionId) => ({ sessionId }));
+      }),
     prisma.event.count({ where: { type: "checkout" } }),
     prisma.event.count({ where: { type: "payment" } }),
     prisma.event.findMany({
@@ -110,42 +124,57 @@ async function computeMetrics(): Promise<PerformanceMetrics> {
       },
     }),
     prisma.event.count({ where: { type: "error" } }),
-    prisma.event.findMany({
-      where: { 
-        type: "visit", 
-        sessionId: { not: null },
-        timestamp: { gte: oneDayAgo } 
-      },
-      select: { sessionId: true },
-    }).then((results) => {
-      const uniqueSessions = new Set(results.map(r => r.sessionId).filter((id): id is string => id !== null));
-      return Array.from(uniqueSessions).map(sessionId => ({ sessionId }));
-    }),
-    prisma.event.findMany({
-      where: { 
-        type: "form", 
-        sessionId: { not: null },
-        timestamp: { gte: oneDayAgo } 
-      },
-      select: { sessionId: true },
-    }).then((results) => {
-      const uniqueSessions = new Set(results.map(r => r.sessionId).filter((id): id is string => id !== null));
-      return Array.from(uniqueSessions).map(sessionId => ({ sessionId }));
-    }),
+    prisma.event
+      .findMany({
+        where: {
+          type: "visit",
+          sessionId: { not: null },
+          timestamp: { gte: oneDayAgo },
+        },
+        select: { sessionId: true },
+      })
+      .then((results: SessionRow[]) => {
+        const uniqueSessions = new Set(
+          results
+            .map((r) => r.sessionId)
+            .filter((id): id is string => id !== null)
+        );
+        return Array.from(uniqueSessions).map((sessionId) => ({ sessionId }));
+      }),
+    prisma.event
+      .findMany({
+        where: {
+          type: "form",
+          sessionId: { not: null },
+          timestamp: { gte: oneDayAgo },
+        },
+        select: { sessionId: true },
+      })
+      .then((results: SessionRow[]) => {
+        const uniqueSessions = new Set(
+          results
+            .map((r) => r.sessionId)
+            .filter((id): id is string => id !== null)
+        );
+        return Array.from(uniqueSessions).map((sessionId) => ({ sessionId }));
+      }),
   ]);
 
   const uniqueVisitors = uniqueVisitorsList.length;
   const totalForms = uniqueFormsList.length;
 
-  const revenueTotal = Math.round(totalPayments * PRICE_PER_PAYMENT * 100) / 100;
-  const conversionRate = uniqueVisitors > 0 
-    ? Math.round((totalPayments / uniqueVisitors) * 10000) / 100 
-    : 0;
+  const revenueTotal =
+    Math.round(totalPayments * PRICE_PER_PAYMENT * 100) / 100;
+  const conversionRate =
+    uniqueVisitors > 0
+      ? Math.round((totalPayments / uniqueVisitors) * 10000) / 100
+      : 0;
 
   const funnelRatios = {
     visitToForm: totalVisits > 0 ? totalForms / totalVisits : 0,
     formToCheckout: totalForms > 0 ? totalCheckouts / totalForms : 0,
-    checkoutToPayment: totalCheckouts > 0 ? totalPayments / totalCheckouts : 0,
+    checkoutToPayment:
+      totalCheckouts > 0 ? totalPayments / totalCheckouts : 0,
   };
 
   // Compute heatmap
@@ -156,7 +185,12 @@ async function computeMetrics(): Promise<PerformanceMetrics> {
     formSessions: Set<string>;
   }> = [];
   for (let h = 0; h < 24; h++) {
-    heatmapBuckets[h] = { visits: 0, forms: 0, payments: 0, formSessions: new Set() };
+    heatmapBuckets[h] = {
+      visits: 0,
+      forms: 0,
+      payments: 0,
+      formSessions: new Set(),
+    };
   }
 
   for (const event of heatmapEvents) {
@@ -188,8 +222,12 @@ async function computeMetrics(): Promise<PerformanceMetrics> {
     .map((h) => h.hour);
 
   // Compute UTM data
-  const sessionUTM: Map<string, { source: string; campaign: string }> = new Map();
-  const sessionMetrics: Map<string, { hasVisit: boolean; hasForm: boolean; hasCheckout: boolean; hasPayment: boolean }> = new Map();
+  const sessionUTM: Map<string, { source: string; campaign: string }> =
+    new Map();
+  const sessionMetrics: Map<
+    string,
+    { hasVisit: boolean; hasForm: boolean; hasCheckout: boolean; hasPayment: boolean }
+  > = new Map();
 
   for (const event of marketingEvents) {
     if (!event.sessionId) continue;
@@ -202,7 +240,12 @@ async function computeMetrics(): Promise<PerformanceMetrics> {
     }
 
     if (!sessionMetrics.has(event.sessionId)) {
-      sessionMetrics.set(event.sessionId, { hasVisit: false, hasForm: false, hasCheckout: false, hasPayment: false });
+      sessionMetrics.set(event.sessionId, {
+        hasVisit: false,
+        hasForm: false,
+        hasCheckout: false,
+        hasPayment: false,
+      });
     }
 
     const metrics = sessionMetrics.get(event.sessionId)!;
@@ -238,24 +281,32 @@ async function computeMetrics(): Promise<PerformanceMetrics> {
     if (metrics.hasCheckout) agg.checkouts++;
     if (metrics.hasPayment) {
       agg.payments++;
-      agg.revenue = Math.round(agg.payments * PRICE_PER_PAYMENT * 100) / 100;
+      agg.revenue =
+        Math.round(agg.payments * PRICE_PER_PAYMENT * 100) / 100;
     }
   });
 
   const utmData = Array.from(aggregation.values())
     .map((agg) => ({
       ...agg,
-      conversionRate: agg.visits > 0 ? Math.round((agg.payments / agg.visits) * 10000) / 100 : 0,
+      conversionRate:
+        agg.visits > 0
+          ? Math.round((agg.payments / agg.visits) * 10000) / 100
+          : 0,
     }))
     .sort((a, b) => b.revenue - a.revenue || b.payments - a.payments);
 
   // Detect drop-off points
   const dropOffPoints: string[] = [];
   if (funnelRatios.visitToForm < 0.1) {
-    dropOffPoints.push("Fort abandon entre la visite et le formulaire (< 10%)");
+    dropOffPoints.push(
+      "Fort abandon entre la visite et le formulaire (< 10%)"
+    );
   }
   if (funnelRatios.formToCheckout < 0.3) {
-    dropOffPoints.push("Perte significative entre formulaire et checkout (< 30%)");
+    dropOffPoints.push(
+      "Perte significative entre formulaire et checkout (< 30%)"
+    );
   }
   if (funnelRatios.checkoutToPayment < 0.5) {
     dropOffPoints.push("Abandon au checkout (< 50% de conversion)");
@@ -263,21 +314,42 @@ async function computeMetrics(): Promise<PerformanceMetrics> {
 
   // Detect anomalies
   const anomalies: string[] = [];
-  const avgVisitsPerHour = heatmap.reduce((sum, h) => sum + h.visits, 0) / heatmap.filter((h) => h.visits > 0).length || 1;
-  const highTrafficHours = heatmap.filter((h) => h.visits > avgVisitsPerHour * 3);
+  const activeHeatmap = heatmap.filter((h) => h.visits > 0);
+  const avgVisitsPerHour =
+    activeHeatmap.length > 0
+      ? activeHeatmap.reduce((sum, h) => sum + h.visits, 0) /
+        activeHeatmap.length
+      : 1;
+
+  const highTrafficHours = heatmap.filter(
+    (h) => h.visits > avgVisitsPerHour * 3
+  );
   if (highTrafficHours.length > 0) {
-    anomalies.push(`Pics de trafic anormaux détectés à ${highTrafficHours.map((h) => `${h.hour}h`).join(", ")}`);
+    anomalies.push(
+      `Pics de trafic anormaux détectés à ${highTrafficHours
+        .map((h) => `${h.hour}h`)
+        .join(", ")}`
+    );
   }
   if (errorCount > 10) {
     anomalies.push(`${errorCount} erreurs détectées dans les logs`);
   }
 
-  // Check bounce rate
-  const visitSessionsSet = new Set(recentVisitSessions.map((s: { sessionId: string | null }) => s.sessionId));
-  const formSessionsSet = new Set(recentFormSessions.map((s: { sessionId: string | null }) => s.sessionId));
-  const bounceRate = visitSessionsSet.size > 0 ? (visitSessionsSet.size - formSessionsSet.size) / visitSessionsSet.size : 0;
+  const visitSessionsSet = new Set(
+    recentVisitSessions.map((s: { sessionId: string | null }) => s.sessionId)
+  );
+  const formSessionsSet = new Set(
+    recentFormSessions.map((s: { sessionId: string | null }) => s.sessionId)
+  );
+  const bounceRate =
+    visitSessionsSet.size > 0
+      ? (visitSessionsSet.size - formSessionsSet.size) /
+        visitSessionsSet.size
+      : 0;
   if (bounceRate > 0.9) {
-    anomalies.push(`Taux de rebond très élevé (${Math.round(bounceRate * 100)}%)`);
+    anomalies.push(
+      `Taux de rebond très élevé (${Math.round(bounceRate * 100)}%)`
+    );
   }
 
   return {
@@ -395,17 +467,22 @@ Règles:
   } catch (error) {
     console.error("OpenAI API error:", error);
     return {
-      summary: "Analyse temporairement indisponible. Les données montrent une activité normale avec des opportunités d'optimisation.",
-      funnelAnalysis: "Le funnel présente des opportunités d'amélioration à chaque étape. Surveillez les points de friction principaux.",
-      heatmapInsights: "Les heures de pointe identifiées peuvent guider vos campagnes publicitaires pour maximiser l'impact.",
-      utmInsights: "Analysez les sources de trafic performantes pour réallouer le budget marketing efficacement.",
+      summary:
+        "Analyse temporairement indisponible. Les données montrent une activité normale avec des opportunités d'optimisation.",
+      funnelAnalysis:
+        "Le funnel présente des opportunités d'amélioration à chaque étape. Surveillez les points de friction principaux.",
+      heatmapInsights:
+        "Les heures de pointe identifiées peuvent guider vos campagnes publicitaires pour maximiser l'impact.",
+      utmInsights:
+        "Analysez les sources de trafic performantes pour réallouer le budget marketing efficacement.",
       recommendations: [
         "Optimisez le formulaire pour augmenter les conversions",
         "Testez différentes heures de publication",
         "Suivez les campagnes UTM performantes",
         "Réduisez le temps de chargement des pages",
       ],
-      predictions: "Prédictions détaillées disponibles après analyse complète des données.",
+      predictions:
+        "Prédictions détaillées disponibles après analyse complète des données.",
     };
   }
 }
