@@ -126,9 +126,10 @@ export async function POST(request: NextRequest) {
     );
 
     // ---------- 2. Idempotence : on regarde si ce paiement existe déjà ----------
-    const existingPayment = await prisma.payment.findUnique({
+    const existingPayment = await prisma.payment.findFirst({
       where: { stripeSessionId: session.id },
     });
+    
 
     if (existingPayment) {
       console.log(
