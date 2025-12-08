@@ -6,9 +6,9 @@ import { generateLongReport } from "@/lib/generateLongReport";
 import { appendLog, SessionContext } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
 import { UTMData } from "@/lib/session";
-import { 
-  sendPaymentAlert, 
-  sendPdfGeneratedAlert, 
+import {
+  sendPaymentAlert,
+  sendPdfGeneratedAlert,
   sendErrorAlert,
 } from "@/lib/notifyTelegram";
 import Stripe from "stripe";
@@ -20,7 +20,7 @@ const PRICE_PER_REPORT = 4.90;
 const PRICE_IN_CENTS = 490;
 
 /**
- * Get today's midnight for revenue calculation
+ * Retourne le début de journée (00:00) pour le fuseau du serveur
  */
 function getTodayMidnight(): Date {
   const now = new Date();
@@ -54,33 +54,53 @@ export async function POST(request: NextRequest) {
 
     console.log(`Received Stripe event: ${event.type}`);
 
-    if (event.type === "checkout.session.completed") {
-      const session = event.data.object as Stripe.Checkout.Session;
+    // On ne traite que checkout.session.completed
+    if (event.type !== "checkout.session.completed") {
+      return NextResponse.json({ received: true });
+    }
 
-      // Récupérer les metadata
-      const metadata = session.metadata;
+    const session = event.data.object as Stripe.Checkout.Session;
 
-      if (!metadata) {
-        console.error("No metadata found in session");
-        return NextResponse.json(
-          { error: "No metadata found in session" },
-          { status: 400 }
-        );
-      }
+    // ---------- 1. Récup metadata ----------
+    const metadata = session.metadata;
+    if (!metadata) {
+      console.error("No metadata found in session");
+      return NextResponse.json(
+        { error: "No metadata found in session" },
+        { status: 400 }
+      );
+    }
 
-      const { email, personA, dateA, personB, dateB, sessionId, utm_source, utm_medium, utm_campaign, utm_content, utm_term } = metadata;
+    const {
+      email,
+      personA,
+      dateA,
+      personB,
+      dateB,
+      sessionId,
+      utm_source,
+      utm_medium,
+      utm_campaign,
+      utm_content,
+      utm_term,
+    } = metadata;
 
-      // Validation des metadata
-      if (!email || !personA || !personB || !dateA || !dateB) {
-        console.error("Missing required metadata:", { email, personA, personB, dateA, dateB });
-        return NextResponse.json(
-          { error: "Missing required metadata" },
-          { status: 400 }
-        );
-      }
+    if (!email || !personA || !personB || !dateA || !dateB) {
+      console.error("Missing required metadata:", {
+        email,
+        personA,
+        personB,
+        dateA,
+        dateB,
+      });
+      return NextResponse.json(
+        { error: "Missing required metadata" },
+        { status: 400 }
+      );
+    }
 
-      // Build UTM data from metadata
-      const utm: UTMData | undefined = (utm_source || utm_medium || utm_campaign || utm_content || utm_term)
+    const utm: UTMData | undefined =
+      utm_source || utm_medium || utm_campaign || utm_content || utm_term
         ? {
             source: utm_source,
             medium: utm_medium,
@@ -90,133 +110,153 @@ export async function POST(request: NextRequest) {
           }
         : undefined;
 
-      // Build session context for logging
-      const sessionContext: SessionContext | undefined = sessionId
-        ? {
-            sessionId,
-            userAgent: "Stripe Webhook",
-            ipAddress: "Stripe",
-            utm,
-          }
-        : undefined;
+    const sessionContext: SessionContext | undefined = sessionId
+      ? {
+          sessionId,
+          userAgent: "Stripe Webhook",
+          ipAddress: "Stripe",
+          utm,
+        }
+      : undefined;
 
-      console.log(`Processing premium payment for ${email} - ${personA} & ${personB}${utm?.source ? ` (UTM: ${utm.source})` : ''}`);
+    console.log(
+      `Processing premium payment for ${email} - ${personA} & ${personB}${
+        utm?.source ? ` (UTM: ${utm.source})` : ""
+      }`
+    );
 
-      // Insert payment into database
-      try {
-        await prisma.payment.create({
-          data: {
-            stripeSessionId: session.id,
-            amount: PRICE_IN_CENTS,
-            currency: "eur",
-            email: email,
-            personA: personA,
-            personB: personB,
-            sessionId: sessionId || null,
-          },
-        });
-        console.log("[PAYMENT] Payment inserted into database");
-      } catch (dbError) {
-        console.error("[PAYMENT] Failed to insert payment:", dbError);
-        // Continue even if insert fails
-      }
+    // ---------- 2. Idempotence : on regarde si ce paiement existe déjà ----------
+    const existingPayment = await prisma.payment.findUnique({
+      where: { stripeSessionId: session.id },
+    });
 
-      // Log payment confirmed with UTM tracking
+    if (existingPayment) {
+      console.log(
+        `[PAYMENT] Stripe session ${session.id} already processed, skipping duplicate work`
+      );
+      // On log juste, mais on ne refait PAS PDF / email / alert / etc.
       await appendLog(
         {
           type: "payment",
-          message: "Payment confirmed",
+          message: "Payment webhook retried (already processed)",
+          payload: { email, personA, personB },
+        },
+        sessionContext
+      );
+      return NextResponse.json({ received: true, duplicate: true });
+    }
+
+    // ---------- 3. Insertion Payment DB ----------
+    try {
+      await prisma.payment.create({
+        data: {
+          stripeSessionId: session.id,
+          amount: PRICE_IN_CENTS,
+          currency: "eur",
+          email,
+          personA,
+          personB,
+          sessionId: sessionId || null,
+        },
+      });
+      console.log("[PAYMENT] Payment inserted into database");
+    } catch (dbError) {
+      console.error("[PAYMENT] Failed to insert payment:", dbError);
+      // on continue quand même, Stripe refera un retry mais l'idempotence plus haut protège
+    }
+
+    // ---------- 4. Log "payment" ----------
+    await appendLog(
+      {
+        type: "payment",
+        message: "Payment confirmed",
+        payload: { email, personA, personB },
+      },
+      sessionContext
+    );
+
+    // ---------- 5. Recalcul CA du jour ----------
+    let revenueToday = PRICE_PER_REPORT;
+    try {
+      const todayMidnight = getTodayMidnight();
+      const paymentsToday = await prisma.payment.count({
+        where: {
+          createdAt: { gte: todayMidnight },
+        },
+      });
+      revenueToday = paymentsToday * PRICE_PER_REPORT;
+    } catch (err) {
+      console.error("Error calculating today's revenue:", err);
+    }
+
+    // ---------- 6. Alerte Telegram paiement + CA ----------
+    await sendPaymentAlert(email, personA, personB, revenueToday);
+
+    // ---------- 7. Long report + PDF + email ----------
+    try {
+      console.log("Generating long premium report via OpenAI...");
+      const reportData = await generateLongReport({
+        personA,
+        dateA,
+        personB,
+        dateB,
+      });
+
+      console.log(
+        `Premium report generated - Score: ${reportData.score}, summary length: ${reportData.summary.length}`
+      );
+
+      console.log("Generating premium PDF...");
+      const pdfBytes = await generatePremiumPdf({
+        personA,
+        dateA,
+        personB,
+        dateB,
+        score: reportData.score,
+        reportData,
+      });
+      console.log(`Premium PDF generated: ${pdfBytes.length} bytes`);
+
+      await sendPdfGeneratedAlert(personA, personB);
+
+      await appendLog(
+        {
+          type: "pdf",
+          message: "PDF generated & email sent",
+          payload: { email, personA, personB, sizeInBytes: pdfBytes.length },
+        },
+        sessionContext
+      );
+
+      console.log(`Sending premium report email to ${email}...`);
+      await sendReportEmail({
+        to: email,
+        personA,
+        personB,
+        pdfBytes,
+      });
+
+      console.log(`✅ Premium report successfully sent to ${email}`);
+    } catch (processingError) {
+      console.error("❌ Error processing premium payment:", processingError);
+
+      const errorMsg =
+        processingError instanceof Error
+          ? processingError.message
+          : "Unknown error during PDF/email processing";
+
+      await appendLog(
+        {
+          type: "error",
+          message: errorMsg,
           payload: { email, personA, personB },
         },
         sessionContext
       );
 
-      // Calculate today's revenue from database
-      let revenueToday = PRICE_PER_REPORT;
-      try {
-        const todayMidnight = getTodayMidnight();
-        const paymentsToday = await prisma.payment.count({
-          where: {
-            createdAt: { gte: todayMidnight },
-          },
-        });
-        revenueToday = paymentsToday * PRICE_PER_REPORT;
-      } catch (err) {
-        console.error("Error calculating today's revenue:", err);
-      }
-
-      // Send Telegram payment alert
-      await sendPaymentAlert(email, personA, personB, revenueToday);
-
-      try {
-        // 1. Générer le rapport premium structuré via OpenAI
-        console.log("Generating long premium report via OpenAI...");
-        const reportData = await generateLongReport({
-          personA,
-          dateA,
-          personB,
-          dateB,
-        });
-        console.log(`Premium report generated - Score: ${reportData.score}`);
-        console.log(`Summary length: ${reportData.summary.length} chars`);
-        console.log(`PortraitA length: ${reportData.portraitA.length} chars`);
-        console.log(`PortraitB length: ${reportData.portraitB.length} chars`);
-
-        // 2. Générer le PDF premium avec les données structurées
-        console.log("Generating premium PDF...");
-        const pdfBytes = await generatePremiumPdf({
-          personA,
-          dateA,
-          personB,
-          dateB,
-          score: reportData.score,
-          reportData,
-        });
-        console.log(`Premium PDF generated: ${pdfBytes.length} bytes`);
-
-        // Send Telegram PDF generated alert
-        await sendPdfGeneratedAlert(personA, personB);
-
-        // Log PDF generated with UTM tracking
-        await appendLog(
-          {
-            type: "pdf",
-            message: "PDF generated & email sent",
-            payload: { email, personA, personB, sizeInBytes: pdfBytes.length },
-          },
-          sessionContext
-        );
-
-        // 3. Envoyer l'email avec le PDF en pièce jointe
-        console.log(`Sending premium report email to ${email}...`);
-        await sendReportEmail({
-          to: email,
-          personA,
-          personB,
-          pdfBytes,
-        });
-
-        console.log(`✅ Premium report successfully sent to ${email}`);
-      } catch (processingError) {
-        console.error("❌ Error processing premium payment:", processingError);
-        
-        const errorMsg = processingError instanceof Error 
-          ? processingError.message 
-          : "Unknown error during PDF/email processing";
-        
-        // Log error with UTM tracking
-        await appendLog(
-          {
-            type: "error",
-            message: errorMsg,
-            payload: { email, personA, personB },
-          },
-          sessionContext
-        );
-        
-        // Send Telegram error alert
-        await sendErrorAlert(`Payment processing failed for ${email}: ${errorMsg}`);
-      }
+      await sendErrorAlert(
+        `Payment processing failed for ${email}: ${errorMsg}`
+      );
     }
 
     return NextResponse.json({ received: true });
