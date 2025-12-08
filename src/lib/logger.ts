@@ -378,14 +378,19 @@ export async function readLatestEvents(limit: number = 200): Promise<LogEntry[]>
 }
 
 /**
- * Resets all logs by deleting all events from the database.
+ * Resets all tracking data by deleting events, sessions, and clearing cache.
+ * Payments are preserved by default (set includePayments to true to delete them too).
  */
 export async function resetLogs(): Promise<void> {
   try {
     await prisma.event.deleteMany({});
-    console.log("[LOG] All logs have been reset");
+    await prisma.userSession.deleteMany({});
+    await prisma.metricsCache.deleteMany({});
+      await prisma.payment.deleteMany({});
+
+    console.log("[LOG] All tracking data has been reset");
   } catch (error) {
-    console.error("[LOG] Failed to reset logs:", error);
+    console.error("[LOG] Failed to reset data:", error);
     throw error;
   }
 }
