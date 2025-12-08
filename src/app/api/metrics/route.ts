@@ -425,15 +425,16 @@ export async function GET() {
     const response = await calculateMetrics();
 
     // Update cache
+    const cacheValue = JSON.parse(JSON.stringify({ response, timestamp: Date.now() }));
     await prisma.metricsCache.upsert({
       where: { key: "metrics_response" },
       update: {
-        value: { response, timestamp: Date.now() } as unknown as object,
+        value: cacheValue,
         updatedAt: new Date(),
       },
       create: {
         key: "metrics_response",
-        value: { response, timestamp: Date.now() } as unknown as object,
+        value: cacheValue,
         updatedAt: new Date(),
       },
     });

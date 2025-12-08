@@ -2,7 +2,6 @@ import { prisma } from "./prisma";
 import { logEmitter } from "./logEmitter";
 import { sendTrafficSpikeAlert } from "./notifyTelegram";
 import { UTMData } from "./session";
-import type { Event as DBEvent } from "@prisma/client";
 
 // Traffic spike detection configuration
 const TRAFFIC_SPIKE_INTERVAL_SECONDS = 20;
@@ -42,6 +41,25 @@ export interface SessionContext {
 }
 
 /**
+ * Type local pour représenter une ligne de la table Event
+ */
+type DBEvent = {
+  id: number;
+  type: string;
+  message: string | null;
+  timestamp: Date;
+  sessionId: string | null;
+  ip: string | null;
+  userAgent: string | null;
+  utmSource: string | null;
+  utmMedium: string | null;
+  utmCampaign: string | null;
+  utmContent: string | null;
+  utmTerm: string | null;
+  metadata: unknown | null;
+};
+
+/**
  * Generates a unique ID for each log entry (compatible with old format)
  */
 function generateId(): string {
@@ -53,17 +71,16 @@ function generateId(): string {
  */
 async function markIAAnalysisAsStale(): Promise<void> {
   try {
+    const cacheValue = JSON.parse(JSON.stringify({ isStale: true }));
     await prisma.metricsCache.upsert({
       where: { key: "ia_analysis" },
       update: {
-        value: {
-          isStale: true,
-        },
+        value: cacheValue,
         updatedAt: new Date(),
       },
       create: {
         key: "ia_analysis",
-        value: { isStale: true },
+        value: cacheValue,
         updatedAt: new Date(),
       },
     });
@@ -241,7 +258,7 @@ export async function appendLog(
         utmCampaign: sessionContext?.utm?.campaign,
         utmContent: sessionContext?.utm?.content,
         utmTerm: sessionContext?.utm?.term,
-        metadata: event.payload ? (event.payload as object) : undefined,
+        metadata: event.payload ? JSON.parse(JSON.stringify(event.payload)) : undefined,
       },
     });
 
@@ -282,30 +299,37 @@ export async function appendLog(
  */
 export async function readLogs(limit: number = 1000): Promise<LogEntry[]> {
   try {
-    const events = await prisma.event.findMany({
+    const events: DBEvent[] = await prisma.event.findMany({
       orderBy: { timestamp: "desc" },
       take: limit,
     });
 
-    return events.map((event: DBEvent) => ({
-      id: event.id.toString(),
-      timestamp: event.timestamp.toISOString(),
-      type: event.type as LogEntry["type"],
-      message: event.message || "",
-      payload: event.metadata as Record<string, unknown> | undefined,
-      sessionId: event.sessionId || undefined,
-      userAgent: event.userAgent || undefined,
-      ipAddress: event.ip || undefined,
-      utm: (event.utmSource || event.utmMedium || event.utmCampaign || event.utmContent || event.utmTerm)
-        ? {
-            source: event.utmSource || undefined,
-            medium: event.utmMedium || undefined,
-            campaign: event.utmCampaign || undefined,
-            content: event.utmContent || undefined,
-            term: event.utmTerm || undefined,
-          }
-        : undefined,
-    })).reverse();
+    return events
+      .map((event) => ({
+        id: event.id.toString(),
+        timestamp: event.timestamp.toISOString(),
+        type: event.type as LogEntry["type"],
+        message: event.message || "",
+        payload: (event.metadata ?? undefined) as Record<string, unknown> | undefined,
+        sessionId: event.sessionId || undefined,
+        userAgent: event.userAgent || undefined,
+        ipAddress: event.ip || undefined,
+        utm:
+          event.utmSource ||
+          event.utmMedium ||
+          event.utmCampaign ||
+          event.utmContent ||
+          event.utmTerm
+            ? {
+                source: event.utmSource || undefined,
+                medium: event.utmMedium || undefined,
+                campaign: event.utmCampaign || undefined,
+                content: event.utmContent || undefined,
+                term: event.utmTerm || undefined,
+              }
+            : undefined,
+      }))
+      .reverse();
     
   } catch (error) {
     console.error("[LOG] Failed to read logs from database:", error);
@@ -318,29 +342,34 @@ export async function readLogs(limit: number = 1000): Promise<LogEntry[]> {
  */
 export async function readLatestEvents(limit: number = 200): Promise<LogEntry[]> {
   try {
-    const events = await prisma.event.findMany({
+    const events: DBEvent[] = await prisma.event.findMany({
       orderBy: { timestamp: "desc" },
       take: limit,
     });
 
-    return events.map((event: DBEvent) => ({
+    return events.map((event) => ({
       id: event.id.toString(),
       timestamp: event.timestamp.toISOString(),
       type: event.type as LogEntry["type"],
       message: event.message || "",
-      payload: event.metadata as Record<string, unknown> | undefined,
+      payload: (event.metadata ?? undefined) as Record<string, unknown> | undefined,
       sessionId: event.sessionId || undefined,
       userAgent: event.userAgent || undefined,
       ipAddress: event.ip || undefined,
-      utm: (event.utmSource || event.utmMedium || event.utmCampaign || event.utmContent || event.utmTerm)
-        ? {
-            source: event.utmSource || undefined,
-            medium: event.utmMedium || undefined,
-            campaign: event.utmCampaign || undefined,
-            content: event.utmContent || undefined,
-            term: event.utmTerm || undefined,
-          }
-        : undefined,
+      utm:
+        event.utmSource ||
+        event.utmMedium ||
+        event.utmCampaign ||
+        event.utmContent ||
+        event.utmTerm
+          ? {
+              source: event.utmSource || undefined,
+              medium: event.utmMedium || undefined,
+              campaign: event.utmCampaign || undefined,
+              content: event.utmContent || undefined,
+              term: event.utmTerm || undefined,
+            }
+          : undefined,
     }));
   } catch (error) {
     console.error("[LOG] Failed to read latest events from database:", error);

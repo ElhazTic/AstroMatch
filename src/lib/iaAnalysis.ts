@@ -45,15 +45,16 @@ export async function loadIAAnalysis(): Promise<IAAnalysisStorage | null> {
  * Save the IA analysis to database cache
  */
 export async function saveIAAnalysis(storage: IAAnalysisStorage): Promise<void> {
+  const cacheValue = JSON.parse(JSON.stringify(storage));
   await prisma.metricsCache.upsert({
     where: { key: "ia_analysis" },
     update: {
-      value: storage as unknown as object,
+      value: cacheValue,
       updatedAt: new Date(),
     },
     create: {
       key: "ia_analysis",
-      value: storage as unknown as object,
+      value: cacheValue,
       updatedAt: new Date(),
     },
   });

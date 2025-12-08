@@ -1,39 +1,32 @@
 import { PrismaClient } from "@prisma/client";
 import { PrismaPg } from "@prisma/adapter-pg";
-import { Pool } from "pg";
+import pg from "pg";
 
-// Déclaration pour éviter les instances multiples en développement
 const globalForPrisma = globalThis as unknown as {
-  prisma: PrismaClient | undefined;
-  pool: Pool | undefined;
+  prisma?: PrismaClient;
 };
 
-// Déterminer si on est en production
-const isProduction = process.env.NODE_ENV === "production";
+const connectionString = process.env.DATABASE_URL;
 
-// Créer le pool de connexion PostgreSQL
-// Configuration SSL pour accepter les certificats auto-signés (développement)
-const pool = globalForPrisma.pool ?? new Pool({
-  connectionString: process.env.DATABASE_URL,
-  // Accepter les certificats auto-signés en développement
-  // En production, utilisez un certificat valide
-  ssl: isProduction 
-    ? { rejectUnauthorized: true } // En production, valider les certificats
-    : { rejectUnauthorized: false }, // En développement, accepter les certificats auto-signés
+if (!connectionString) {
+  throw new Error("DATABASE_URL is not set");
+}
+
+const pool = new pg.Pool({
+  connectionString,
+  ssl: { rejectUnauthorized: false }, // nécessaire pour Supabase
 });
 
-// Créer l'adaptateur Prisma pour PostgreSQL
 const adapter = new PrismaPg(pool);
 
-// Créer une instance singleton du client Prisma
-export const prisma = globalForPrisma.prisma ?? new PrismaClient({
-  adapter,
-  log: !isProduction ? ["error", "warn"] : ["error"],
-});
+export const prisma =
+  globalForPrisma.prisma ??
+  new PrismaClient({
+    adapter,
+  });
 
-if (!isProduction) {
+if (process.env.NODE_ENV !== "production") {
   globalForPrisma.prisma = prisma;
-  globalForPrisma.pool = pool;
 }
 
 export default prisma;

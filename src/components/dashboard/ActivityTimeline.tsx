@@ -71,7 +71,7 @@ export default function ActivityTimeline({ logs }: ActivityTimelineProps) {
         payments: 0,
         checkouts: 0,
         dominantSource: null,
-        sourceCounts: {},
+        sourceCounts: {} as Record<string, number>,
         hasActivity: false,
       });
     }
@@ -189,6 +189,7 @@ export default function ActivityTimeline({ logs }: ActivityTimelineProps) {
     </div>
   );
 }
+
 
 
 
