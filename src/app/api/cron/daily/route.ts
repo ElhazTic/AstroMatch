@@ -2,6 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { readLogs, LogEntry } from "@/lib/logger";
 import { sendDailySummary, getTodayMidnight } from "@/lib/notifyTelegram";
 
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
 const PRICE_PER_REPORT = 4.90;
 
 /**

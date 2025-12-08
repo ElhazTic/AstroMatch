@@ -1,6 +1,9 @@
 import { NextResponse } from "next/server";
 import { resetLogs } from "@/lib/logger";
 
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
 /**
  * DELETE /api/log/reset
  * Resets all logs by clearing the database.

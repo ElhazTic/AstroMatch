@@ -9,6 +9,7 @@ import {
   IAAnalysisStorage,
 } from "@/lib/iaAnalysis";
 
+export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 // Constants

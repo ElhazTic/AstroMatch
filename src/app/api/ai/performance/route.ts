@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { getOpenAIClient } from "@/lib/openai";
 
+export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 // Price per payment

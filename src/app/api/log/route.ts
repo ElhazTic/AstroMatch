@@ -4,6 +4,9 @@ import { sendFormAlert } from "@/lib/notifyTelegram";
 import { getSessionContext, setSessionCookie, setUTMCookie } from "@/lib/session";
 import { maskEmailsInObject } from "@/lib/maskEmail";
 
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
 /**
  * POST /api/log
  * Creates a new log entry with session tracking.

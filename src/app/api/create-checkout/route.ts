@@ -3,6 +3,9 @@ import { createCheckoutSession } from "@/lib/stripe";
 import { appendLog } from "@/lib/logger";
 import { getSessionContext, setSessionCookie, setUTMCookie } from "@/lib/session";
 
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
 interface CheckoutRequest {
   email: string;
   personA: string;

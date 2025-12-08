@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { readLatestEvents } from "@/lib/logger";
 import { maskEmailsInObject } from "@/lib/maskEmail";
 
+export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 /**

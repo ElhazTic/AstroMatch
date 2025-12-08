@@ -13,6 +13,9 @@ import {
 } from "@/lib/notifyTelegram";
 import Stripe from "stripe";
 
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
 const PRICE_PER_REPORT = 4.90;
 const PRICE_IN_CENTS = 490;
 

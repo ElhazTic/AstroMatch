@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { maskEmailsInObject } from "@/lib/maskEmail";
 
+export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 // Cache TTL in milliseconds (30 seconds)
