@@ -130,15 +130,19 @@ async function calculateMetrics(): Promise<MetricsResponse> {
     prisma.event.findMany({
       where: { type: "visit", sessionId: { not: null } },
       select: { sessionId: true },
-      distinct: ["sessionId"],
-    }).then((results: Array<{ sessionId: string | null }>) => results.length),
+    }).then((results: Array<{ sessionId: string | null }>) => {
+      const uniqueSessions = new Set(results.map(r => r.sessionId).filter((id): id is string => id !== null));
+      return uniqueSessions.size;
+    }),
     
     // Unique forms per session
     prisma.event.findMany({
       where: { type: "form", sessionId: { not: null } },
       select: { sessionId: true },
-      distinct: ["sessionId"],
-    }).then((results: Array<{ sessionId: string | null }>) => results.length),
+    }).then((results: Array<{ sessionId: string | null }>) => {
+      const uniqueSessions = new Set(results.map(r => r.sessionId).filter((id): id is string => id !== null));
+      return uniqueSessions.size;
+    }),
     
     // Total checkouts
     prisma.event.count({ where: { type: "checkout" } }),

@@ -75,12 +75,16 @@ async function computeMetrics(): Promise<PerformanceMetrics> {
     prisma.event.findMany({
       where: { type: "visit", sessionId: { not: null } },
       select: { sessionId: true },
-      distinct: ["sessionId"],
+    }).then((results) => {
+      const uniqueSessions = new Set(results.map(r => r.sessionId).filter((id): id is string => id !== null));
+      return Array.from(uniqueSessions).map(sessionId => ({ sessionId }));
     }),
     prisma.event.findMany({
       where: { type: "form", sessionId: { not: null } },
       select: { sessionId: true },
-      distinct: ["sessionId"],
+    }).then((results) => {
+      const uniqueSessions = new Set(results.map(r => r.sessionId).filter((id): id is string => id !== null));
+      return Array.from(uniqueSessions).map(sessionId => ({ sessionId }));
     }),
     prisma.event.count({ where: { type: "checkout" } }),
     prisma.event.count({ where: { type: "payment" } }),

@@ -16,7 +16,7 @@ Analyse de compatibilité amoureuse par IA, astrologie et psychologie relationne
 
 - **Framework** : Next.js 14 (App Router)
 - **Langage** : TypeScript
-- **Database** : PostgreSQL + Prisma 7
+- **Database** : PostgreSQL + Prisma 6.2.1
 - **Styles** : Tailwind CSS
 - **IA** : OpenAI GPT-4o-mini
 - **Paiement** : Stripe Checkout
