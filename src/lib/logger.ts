@@ -1,4 +1,5 @@
 import { prisma } from "./prisma";
+import type { Prisma } from "@prisma/client/edge";
 import { logEmitter } from "./logEmitter";
 import { sendTrafficSpikeAlert } from "./notifyTelegram";
 import { UTMData } from "./session";
@@ -41,23 +42,9 @@ export interface SessionContext {
 }
 
 /**
- * Type local pour représenter une ligne de la table Event
+ * Type pour représenter une ligne de la table Event
  */
-type DBEvent = {
-  id: number;
-  type: string;
-  message: string | null;
-  timestamp: Date;
-  sessionId: string | null;
-  ip: string | null;
-  userAgent: string | null;
-  utmSource: string | null;
-  utmMedium: string | null;
-  utmCampaign: string | null;
-  utmContent: string | null;
-  utmTerm: string | null;
-  metadata: unknown | null;
-};
+type DBEvent = Prisma.EventGetPayload<true>;
 
 /**
  * Generates a unique ID for each log entry (compatible with old format)
