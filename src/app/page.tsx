@@ -183,11 +183,11 @@ export default function HomePage() {
     }
 
     // Log checkout started
-    logEvent("checkout", "Checkout started", {
-      email: email.trim(),
-      personA: personA.trim(),
-      personB: personB.trim(),
-    }, utmStringRef.current);
+    //logEvent("checkout", "Checkout started", {
+     // email: email.trim(),
+    //  personA: personA.trim(),
+     // personB: personB.trim(),
+    //}, utmStringRef.current);
 
     setError(null);
     setTermsError(null);

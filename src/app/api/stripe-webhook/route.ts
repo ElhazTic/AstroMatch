@@ -135,15 +135,7 @@ export async function POST(request: NextRequest) {
       console.log(
         `[PAYMENT] Stripe session ${session.id} already processed, skipping duplicate work`
       );
-      // On log juste, mais on ne refait PAS PDF / email / alert / etc.
-      await appendLog(
-        {
-          type: "payment",
-          message: "Payment webhook retried (already processed)",
-          payload: { email, personA, personB },
-        },
-        sessionContext
-      );
+
       return NextResponse.json({ received: true, duplicate: true });
     }
 
